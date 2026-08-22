@@ -2,12 +2,15 @@
 ``` 
 # ISDT Charge Utility
 
-**Linux GUI for ISDT C4 Air charger** – Direct Bluetooth Low Energy (BLE) connection.  
+**Cross-platform GUI for ISDT C4 Air charger**
+- Direct Bluetooth Low Energy (BLE) connection.  
+- Works under Windows and Linux.
+
 Monitor and control your charger with ease.
 
 ![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)
 
 ---
 
@@ -43,7 +46,6 @@ Monitor and control your charger with ease.
 - **Alarm Tone** – Toggle on/off with a single click (🔊/🔇)
 - **Battery‑specific Validation** – Prevents invalid values
 - **Persistent Settings** – MAC, device name, interval, Bind UUID are saved
-- **Blueman Conflict Resolution** – Automatic disconnect when Blueman is active
 
 ---
 
@@ -62,6 +64,12 @@ Monitor and control your charger with ease.
 
 ## 📋 Requirements
 
+### Windows
+- **Windows 10 or 11** (with Bluetooth 4.0+)
+- **Python 3.10 or higher**
+- **Bluetooth adapter** (built-in or USB)
+
+### Linux
 - **Linux** (tested on Ubuntu/Debian, should work on other distributions)
 - **Python 3.10 or higher**
 - **Bluetooth adapter** (built-in or USB)
@@ -71,7 +79,7 @@ Monitor and control your charger with ease.
 
 ## 🔧 Installation
 
-### 1. Clone the repository
+### 1. Clone or download the repository
 
 ```bash
 git clone https://github.com/DittelHome/ISDT-Charge-Utility.git
@@ -80,6 +88,12 @@ cd ISDT-Charge-Utility
 
 ### 2. Install Python dependencies
 
+#### Windows
+```cmd
+pip install bleak
+```
+
+#### Linux
 ```bash
 # Create and activate virtual environment (optional)
 python3 -m venv .isdt
@@ -97,6 +111,14 @@ sudo apt install python3-bleak
 
 ### 3. Run the application
 
+#### Windows
+- **Double-click** `isdt.py` (if `.py` files are associated with Python)
+- **Or** create a shortcut:
+  - Right-click on desktop → New → Shortcut
+  - Move the shortcut to `Start Menu` or `Taskbar`
+
+
+#### Linux
 ```bash
 python3 isdt.py
 ```
@@ -107,6 +129,7 @@ python3 isdt.py
 
 ### First Start
 
+## 🔹 Linux
 1. **Pair the device in Blueman** (one-time)
    - Open Blueman Manager
    - Scan for devices
@@ -130,6 +153,25 @@ python3 isdt.py
    - Click **"Connect (saved)"**
    - The connection will be established and polling starts automatically
 
+## 🔹 Windows
+> **⚠️ Important:** On Windows, the ISDT C4 Air must **NOT** be paired via Windows Bluetooth settings!
+> Do **NOT** use "Add Bluetooth device" in Windows to pair the charger.
+> The app handles the BLE connection directly.
+
+1. **Start the app**
+   - Double-click `isdt.py` or use the shortcut
+
+2. **Scan and save your device**
+   - Go to the **"Settings"** tab
+   - Click **"Scan"**
+   - Select your ISDT device from the list
+   - Click **"Save selected device"**
+
+3. **Connect**
+   - Switch to the **"Device"** tab
+   - Click **"Connect (saved)"**
+   - The connection will be established and polling starts automatically
+---
 ### Controlling Charging Parameters
 
 1. **Select a slot**
@@ -150,6 +192,7 @@ python3 isdt.py
 4. **Alarm Tone**
    - Click the **speaker icon** (🔊/🔇) in the top bar to toggle the alarm on/off
 
+---
 ### Battery‑specific Validation
 
 The tool validates your input based on the selected battery type. Invalid values will show an error message.
@@ -182,7 +225,7 @@ The tool validates your input based on the selected battery type. Invalid values
 
 ---
 
-## 📁 Project Structure
+### 📁 Project Structure
 
 | File | Description |
 |------|-------------|
@@ -191,6 +234,8 @@ The tool validates your input based on the selected battery type. Invalid values
 | `isdt_protocol.py` | Protocol definitions and parsers |
 | `isdt_config.py` | Settings load/save |
 | `isdt_limits.py` | Battery‑specific validation limits (customizable) |
+| `start_windows.bat` | Windows launcher with BLE fixes |
+| `windows_ble_fix.bat` | Windows BLE troubleshooting script |
 
 ---
 
@@ -213,13 +258,20 @@ Settings are stored in `~/.isdt_gui_config.json`:
 
 ### "Device with address ... was not found"
 
-1. Make sure the charger is powered on
-2. Close the ISD Link app on your smartphone
-3. Click "Disconnect" and then "Connect" again
+#### Windows
+- **Do NOT pair** the device via Windows Bluetooth settings
+
+#### Linux
+- Pair the device in Blueman (PIN: `000000`)
+
+### Connection Timeout
+- Make sure the charger is within 1-2 meters of your PC
+- **Close the ISD Link app** on your smartphone or on a second PC (IMPORTANT!)
+
 
 ### "Device is rebooting sometimes"
-Make sure you have a good USB‑C power adapter.  
-The ISDT Charger requires 12 V, otherwise it won't charge Li‑ion batteries.
+- Make sure you have a good USB‑C power adapter.  
+- The ISDT Charger requires 12 V, otherwise it won't charge Li‑ion batteries.
 
 ---
 
@@ -243,13 +295,17 @@ The BLE protocol is based on the documentation from the [Home Assistant Integrat
 
 ## 💻 Platform Support
 
-| Platform | Support |
-|----------|---------|
-| **Linux** | ✅ Fully supported |
-| **Windows** | ⚠️ Only via WSL (Windows Subsystem for Linux) – not tested |
-| **macOS** | ❌ Not tested |
+| Platform | Support | Notes |
+|----------|---------|-------|
+| **Linux** | ✅ Full support | Tested on Ubuntu/Debian |
+| **Windows 10/11** | ✅ Full support | Requires Python 3.10+
+| **macOS** | ❌ Not tested | - |
 
-The program is specifically designed for Linux and uses Linux‑specific tools (`bluetoothctl`).  
+>Windows 11 Test was performed with Python 3.13.15 successfully.
+Python 3.14.7 (newest one) had problems (no BLE connect).
+
+The program works natively on both Linux and Windows.
+
 
 ---
 
@@ -267,4 +323,3 @@ MIT License – see [LICENSE](LICENSE) file.
 ---
 
 **Note:** This is an independent community project and is not affiliated with, endorsed by, or sponsored by ISDT.
-
