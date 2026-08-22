@@ -112,16 +112,17 @@ sudo apt install python3-bleak
 ### 3. Run the application
 
 #### Windows
-- **Double-click** `isdt.py` (if `.py` files are associated with Python)
-- **Or** create a shortcut:
+- Double-click `isdt.py` (if `.py` files are associated with Python)
+- Or create a shortcut:
   - Right-click on desktop → New → Shortcut
   - Move the shortcut to `Start Menu` or `Taskbar`
 
 
 #### Linux
-```bash
-python3 isdt.py
-```
+
+- python3 isdt.py
+- Or Create a *.Starter
+
 
 ---
 
@@ -234,14 +235,14 @@ The tool validates your input based on the selected battery type. Invalid values
 | `isdt_protocol.py` | Protocol definitions and parsers |
 | `isdt_config.py` | Settings load/save |
 | `isdt_limits.py` | Battery‑specific validation limits (customizable) |
-| `start_windows.bat` | Windows launcher with BLE fixes |
-| `windows_ble_fix.bat` | Windows BLE troubleshooting script |
+| `PROTOCOL.md` | Technical documentation of the BLE protocol |
+
 
 ---
 
 ## ⚙️ Configuration
 
-Settings are stored in `~/.isdt_gui_config.json`:
+Settings are stored in `~/.isdt_gui_config.json` or  `C:\Users\username\.isdt_gui_config.json:`
 
 ```json
 {
