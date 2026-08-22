@@ -1,0 +1,962 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+ISDT C4 Air – Monitor & Control
+
+This is the main GUI application for the ISDT C4 Air charger.
+It provides real-time monitoring of all 6 charging slots and full control
+over charging parameters (battery type, current, capacity limit, cut‑off).
+
+Key features:
+- BLE connection management (connect/disconnect/auto‑connect)
+- Live data display (voltage, current, capacity, IR, charge time, status)
+- Parameter control with battery‑specific validation
+- Alarm tone toggle
+- Persistent configuration (MAC, device name, poll interval, bind UUID)
+- Adaptive polling (longer intervals when idle)
+- GUI caching (only redraws when data changes)
+
+Dependencies:
+- bleak (BLE library)
+- tkinter (GUI)
+- asyncio (async BLE communication)
+
+Author: Klaus Voigt
+License: MIT
+"""
+
+import asyncio
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox
+import threading
+import time
+import subprocess
+
+from isdt_ble import ISDTBLE
+from isdt_config import load_config, save_config
+from isdt_protocol import WORK_STATE_MAP, BATTERY_TYPE_MAP, BATTERY_TYPE_STR_TO_INT
+from isdt_limits import BATTERY_LIMITS, CURRENT_MIN_MA, CURRENT_MAX_MA
+
+
+class ISDTGui:
+    """
+    Main GUI class for the ISDT C4 Air Charger Monitor.
+
+    Responsibilities:
+    - Build and manage the tkinter interface (tabs "Device" and "Settings")
+    - Manage BLE connection lifecycle (connect, disconnect, auto‑connect)
+    - Start/stop the polling loop for live data
+    - Display charging data in a table (6 slots)
+    - Control charging parameters (battery type, current, capacity limit, cut‑off)
+    - Toggle alarm tone
+    - Log messages to a scrollable text area
+    - Scan for BLE devices and persist settings
+
+    Architecture:
+    - BLE communication runs in a background asyncio event loop
+    - GUI updates are scheduled via root.after() to avoid blocking
+    - Polling interval adapts: shorter when slots are active, longer when idle
+    - Table updates only when data actually changes (GUI caching)
+    """
+
+    def __init__(self, root):
+        """
+        Constructor – initializes the GUI, loads config, and starts auto‑connection.
+
+        Args:
+            root: The tkinter main window (tk.Tk())
+        """
+        self.root = root
+        self.root.title("ISDT C4 Air – Monitor & Control")
+
+        # Load saved configuration from ~/.isdt_gui_config.json
+        self.config = load_config()
+
+        # BLE device object (initialized after successful connection)
+        self.device = None
+
+        # State variables
+        self.scanning = False          # Is a BLE scan currently running?
+        self.polling = False           # Is the polling loop running?
+        self.scanned_devices = []      # List of discovered BLE devices
+        self.charge_start_times = {}   # Fallback charge time per slot (if device doesn't send it)
+        self._last_table_values = []   # GUI caching: last displayed rows
+
+        # Configure ttk styles
+        style = ttk.Style()
+        style.theme_use('clam')
+        # Red, bold "Apply" button to make it stand out as the primary action
+        style.configure("Red.TButton", foreground="red", font=('Helvetica', 10, 'bold'))
+
+        # Create notebook (tabbed interface)
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Tab 1: "Device" – main view with table and controls
+        self.tab_device = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_device, text="Device")
+        self._build_device_tab()
+
+        # Tab 2: "Settings" – scan and configuration
+        self.tab_settings = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_settings, text="Settings")
+        self._build_settings_tab()
+
+        # Start asyncio event loop in background thread
+        # BLE operations are async, GUI runs in main thread
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(target=self._run_loop, daemon=True)
+        self.thread.start()
+
+        # Auto-connect if MAC address is saved
+        if self.config.get("mac_address"):
+            mac = self.config.get("mac_address")
+            self._kill_blueman_connection(mac)   # Disconnect any existing Blueman connection
+            self.root.after(500, self.auto_connect)  # Connect after 500ms delay
+
+    def _run_loop(self):
+        """Starts the asyncio event loop in the background thread."""
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_forever()
+
+    # ------------------------------------------------------------------
+    # GUI Builders
+    # ------------------------------------------------------------------
+
+    def _build_device_tab(self):
+        """
+        Builds the 'Device' tab – the main view.
+
+        Contains:
+        - Status bar (connection status, input voltage, total power)
+        - Control buttons (Connect, Disconnect, Alarm toggle)
+        - Data table with 9 columns (Slot, Status, Type, Voltage, Current,
+          Capacity, IR, Charge Time, Charge Level)
+        - Slot Settings panel (battery type, current, capacity limit, cut‑off)
+        - Log window for status messages
+        """
+        # ---- Top bar ----
+        frame_top = ttk.Frame(self.tab_device)
+        frame_top.pack(pady=5, fill=tk.X)
+
+        # Connection status
+        self.status_label = ttk.Label(frame_top, text="No device connected", foreground="gray")
+        self.status_label.pack(side=tk.LEFT, padx=5)
+
+        # Input voltage (from Slot 1 Electric response)
+        self.input_voltage_label = ttk.Label(frame_top, text="🔌 Input voltage: -- V", foreground="blue")
+        self.input_voltage_label.pack(side=tk.LEFT, padx=15)
+
+        # Total power (input voltage × input current)
+        self.total_power_label = ttk.Label(frame_top, text="⚡ Total power: -- W", foreground="green")
+        self.total_power_label.pack(side=tk.LEFT, padx=15)
+
+        # Connect/Disconnect buttons
+        self.connect_btn = ttk.Button(frame_top, text="Connect (saved)", command=self.connect_saved)
+        self.connect_btn.pack(side=tk.LEFT, padx=2)
+
+        self.disconnect_btn = ttk.Button(frame_top, text="Disconnect", command=self.disconnect_device, state=tk.DISABLED)
+        self.disconnect_btn.pack(side=tk.LEFT, padx=2)
+
+        # Alarm tone toggle button (speaker icon)
+        self.alarm_btn = ttk.Button(frame_top, text="🔊", width=4, command=self.toggle_alarm_tone)
+        self.alarm_btn.pack(side=tk.LEFT, padx=5)
+
+        # ---- Data table ----
+        # Note: "Energy (mWh)" column is intentionally omitted – the original app doesn't show it either
+        columns = (
+            "Slot", "Status", "Type", "Voltage (V)", "Current (A)",
+            "Capacity (mAh)", "IR (mΩ)", "Charge Time", "Charge Level"
+        )
+        self.tree = ttk.Treeview(self.tab_device, columns=columns, show="headings")
+
+        # Column widths
+        col_widths = {
+            "Slot": 50, "Status": 150, "Type": 80, "Voltage (V)": 100,
+            "Current (A)": 100, "Capacity (mAh)": 120,
+            "IR (mΩ)": 80, "Charge Time": 100, "Charge Level": 170,
+        }
+        for col in columns:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=col_widths.get(col, 100), anchor="center", minwidth=50)
+        self.tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Click on table row → automatically select the slot and load settings
+        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+
+        # ---- Slot Settings panel ----
+        settings_frame = ttk.LabelFrame(self.tab_device, text="🔧 Slot Settings")
+        settings_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        # Slot selection (1–6)
+        ttk.Label(settings_frame, text="Slot:").grid(row=0, column=0, padx=5, pady=5)
+        self.slot_var = tk.StringVar(value="1")
+        slot_combo = ttk.Combobox(settings_frame, textvariable=self.slot_var,
+                                  values=[str(i) for i in range(1,7)], width=5)
+        slot_combo.grid(row=0, column=1, padx=5)
+        # When slot changes, load its settings
+        slot_combo.bind("<<ComboboxSelected>>", lambda e: self.update_settings_fields())
+
+        # Battery type dropdown (values from BATTERY_TYPE_STR_TO_INT)
+        ttk.Label(settings_frame, text="Battery type:").grid(row=0, column=2, padx=5)
+        self.battery_type_var = tk.StringVar()
+        battery_combo = ttk.Combobox(settings_frame, textvariable=self.battery_type_var,
+                                     values=["LiHV", "LiIon", "LiFe", "NiZn", "NiMH", "LiIon(1.5V)", "Auto"],
+                                     width=12)
+        battery_combo.grid(row=0, column=3, padx=5)
+        battery_combo.set("Auto")  # Default
+        # When battery type changes, enable/disable cut‑off field accordingly
+        battery_combo.bind("<<ComboboxSelected>>", self._update_cutoff_state)
+
+        # Charge current (mA) – 100–2000 mA range
+        ttk.Label(settings_frame, text="Current (mA):").grid(row=0, column=4, padx=5)
+        self.current_entry = ttk.Entry(settings_frame, width=8)
+        self.current_entry.grid(row=0, column=5, padx=5)
+        self.current_entry.insert(0, "1000")
+
+        # Capacity limit (mAh) – battery‑specific range, 0 = unlimited
+        ttk.Label(settings_frame, text="Capacity limit (mAh):").grid(row=0, column=6, padx=5)
+        self.capacity_entry = ttk.Entry(settings_frame, width=8)
+        self.capacity_entry.grid(row=0, column=7, padx=5)
+        self.capacity_entry.insert(0, "2000")
+
+        # Cut‑off voltage (mV) – battery‑specific range, 0 = default
+        # Disabled for Auto and LiIon(1.5V) (no cut‑off possible)
+        ttk.Label(settings_frame, text="Cut‑off (mV):").grid(row=0, column=8, padx=5)
+        self.cutoff_entry = ttk.Entry(settings_frame, width=6)
+        self.cutoff_entry.grid(row=0, column=9, padx=5)
+        self.cutoff_entry.insert(0, "5")
+
+        # Apply button – red, bold, sends settings to charger
+        set_btn = ttk.Button(settings_frame, text="Apply", style="Red.TButton", command=self.apply_settings)
+        set_btn.grid(row=0, column=10, padx=10)
+
+        # ---- Log window ----
+        self.log = scrolledtext.ScrolledText(self.tab_device, height=6, state='disabled')
+        self.log.pack(fill=tk.X, padx=10, pady=5)
+
+    def _build_settings_tab(self):
+        """
+        Builds the 'Settings' tab – two columns side by side.
+
+        Left column: Scan area
+        - Scan button
+        - Listbox with found devices
+        - Save button to store selected device
+
+        Right column: Settings
+        - MAC address (read‑only, shown for reference)
+        - Device name
+        - Poll interval (seconds)
+        """
+        main_frame = ttk.Frame(self.tab_settings, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # ---- Left column: Scan ----
+        left_frame = ttk.Frame(main_frame)
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+
+        ttk.Label(left_frame, text="🔍 Scan for devices:", font=("", 10, "bold")).pack(anchor=tk.W, pady=(0, 10))
+
+        self.scan_btn = ttk.Button(left_frame, text="Scan", command=self.scan_devices)
+        self.scan_btn.pack(anchor=tk.W, pady=5)
+
+        self.scan_status = ttk.Label(left_frame, text="", foreground="gray")
+        self.scan_status.pack(anchor=tk.W, pady=5)
+
+        ttk.Label(left_frame, text="Found devices:").pack(anchor=tk.W, pady=(10, 5))
+        self.device_listbox = tk.Listbox(left_frame, height=6, width=40)
+        self.device_listbox.pack(fill=tk.X, pady=5)
+        self.device_listbox.bind("<<ListboxSelect>>", self.on_device_select)
+
+        self.save_btn = ttk.Button(left_frame, text="Save selected device",
+                                   command=self.save_selected_device, state=tk.DISABLED)
+        self.save_btn.pack(anchor=tk.W, pady=10)
+
+        # ---- Right column: Settings ----
+        right_frame = ttk.Frame(main_frame)
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
+
+        ttk.Label(right_frame, text="💾 Settings:", font=("", 10, "bold")).pack(anchor=tk.W, pady=(0, 10))
+
+        ttk.Label(right_frame, text="MAC address:").pack(anchor=tk.W, pady=(5, 0))
+        self.settings_mac = ttk.Entry(right_frame, width=30)
+        self.settings_mac.pack(anchor=tk.W, pady=2)
+        self.settings_mac.insert(0, self.config.get("mac_address", ""))
+
+        ttk.Label(right_frame, text="Device name:").pack(anchor=tk.W, pady=(10, 0))
+        self.settings_name = ttk.Entry(right_frame, width=30)
+        self.settings_name.pack(anchor=tk.W, pady=2)
+        self.settings_name.insert(0, self.config.get("device_name", ""))
+
+        ttk.Label(right_frame, text="Poll interval (s):").pack(anchor=tk.W, pady=(10, 0))
+        self.settings_interval = ttk.Entry(right_frame, width=10)
+        self.settings_interval.pack(anchor=tk.W, pady=2)
+        self.settings_interval.insert(0, str(self.config.get("poll_interval", 5)))
+
+        save_settings_btn = ttk.Button(right_frame, text="Save settings", command=self.save_settings)
+        save_settings_btn.pack(anchor=tk.W, pady=20)
+
+    # ------------------------------------------------------------------
+    # Logging & Status Updates
+    # ------------------------------------------------------------------
+
+    def log_message(self, msg):
+        """Adds a message to the log window (with newline)."""
+        self.log.config(state='normal')
+        self.log.insert(tk.END, msg + "\n")
+        self.log.see(tk.END)  # Auto‑scroll to bottom
+        self.log.config(state='disabled')
+
+    def update_status(self, text, color="black"):
+        """Updates the status label at the top."""
+        self.status_label.config(text=text, foreground=color)
+
+    def update_device_info(self, input_voltage_mV, input_current_mA):
+        """
+        Updates the input voltage and total power display in the top bar.
+
+        Args:
+            input_voltage_mV: Input voltage in millivolts
+            input_current_mA: Input current in milliamperes
+        """
+        self.input_voltage_label.config(text=f"🔌 Input voltage: {input_voltage_mV/1000:.1f} V")
+        if input_voltage_mV > 0 and input_current_mA > 0:
+            total_power_W = (input_voltage_mV * input_current_mA) / 1_000_000
+            self.total_power_label.config(text=f"⚡ Total power: {total_power_W:.1f} W")
+        else:
+            self.total_power_label.config(text="⚡ Total power: -- W")
+
+    # ------------------------------------------------------------------
+    # Bluetooth Helpers
+    # ------------------------------------------------------------------
+
+    def _kill_blueman_connection(self, mac):
+        """
+        Disconnects an active Blueman connection to the given MAC address.
+
+        Blueman sometimes keeps the connection active and blocks BLE access.
+        This function releases the connection so that bleak can use it.
+
+        Args:
+            mac: MAC address of the device
+        """
+        if not mac:
+            return
+        try:
+            subprocess.run(["bluetoothctl", "disconnect", mac], capture_output=True, timeout=3)
+            time.sleep(0.3)  # Wait for the disconnection to settle
+        except Exception:
+            pass  # Ignore errors – not critical
+
+    # ------------------------------------------------------------------
+    # Cut‑off Field State
+    # ------------------------------------------------------------------
+
+    def _update_cutoff_state(self, event=None):
+        """
+        Enables or disables the cut‑off field based on the selected battery type.
+
+        For Auto and LiIon(1.5V), cut‑off is not supported – the field is disabled.
+        For all other types, the field is enabled.
+        """
+        batt_str = self.battery_type_var.get()
+        limits = BATTERY_LIMITS.get(batt_str)
+        if limits and not limits["cutoff_enabled"]:
+            self.cutoff_entry.config(state='disabled')
+            self.cutoff_entry.delete(0, tk.END)
+            self.cutoff_entry.insert(0, "0")
+        else:
+            self.cutoff_entry.config(state='normal')
+            if self.cutoff_entry.get() == "0":
+                self.cutoff_entry.delete(0, tk.END)
+                self.cutoff_entry.insert(0, "5")
+
+    # ------------------------------------------------------------------
+    # Connection Management
+    # ------------------------------------------------------------------
+
+    def auto_connect(self):
+        """
+        Automatic connection on startup.
+
+        Called by __init__ after a 500ms delay. Uses the saved MAC address.
+        """
+        mac = self.config.get("mac_address")
+        if mac:
+            self.log_message(f"⏳ Auto-connecting to {mac} ...")
+            self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False, config=self.config)
+            asyncio.run_coroutine_threadsafe(self._connect_async(), self.loop)
+
+    def connect_saved(self):
+        """Manual connection using the saved MAC address (button click)."""
+        mac = self.config.get("mac_address")
+        if not mac:
+            messagebox.showerror("Error", "No MAC address saved.")
+            return
+        self.log_message(f"⏳ Connecting to saved address {mac} ...")
+        self._kill_blueman_connection(mac)
+        self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False, config=self.config)
+        asyncio.run_coroutine_threadsafe(self._connect_async(), self.loop)
+
+    async def _connect_async(self):
+        """
+        Asynchronous connection routine.
+
+        Attempts to connect to the device and starts polling on success.
+        Shows helpful tips in the log on failure.
+        """
+        try:
+            success = await self.device.connect(retries=2)
+            if success:
+                self.root.after(0, lambda: self.log_message("✅ Connected!"))
+                self.root.after(0, lambda: self.update_status(
+                    f"Connected to {self.config.get('device_name', self.device.address)}", "green"
+                ))
+                self.root.after(0, lambda: self.connect_btn.config(state=tk.DISABLED))
+                self.root.after(0, lambda: self.disconnect_btn.config(state=tk.NORMAL))
+                self.start_polling()
+                # After 1 second, load settings for the currently selected slot
+                self.root.after(1000, self.update_settings_fields)
+                # Update alarm button state
+                await self._update_alarm_button()
+            else:
+                self.root.after(0, lambda: self.log_message("⚠️ Connection failed."))
+                self.root.after(0, lambda: self.log_message("💡 Tip: Please close the ISD Link app on your smartphone."))
+                self.root.after(0, lambda: self.log_message("💡 Tip: Make sure the charger is powered on."))
+        except Exception as e:
+            self.root.after(0, lambda: self.log_message(f"⚠️ Error: {str(e)}"))
+            self.root.after(0, lambda: self.log_message("💡 Tip: Please close the ISD Link app on your smartphone."))
+            self.root.after(0, lambda: self.log_message("💡 Tip: Make sure the charger is powered on."))
+
+    def disconnect_device(self):
+        """
+        Disconnects from the charger and resets the GUI.
+
+        Stops polling, disconnects BLE, clears the table, and resets buttons.
+        """
+        mac = self.config.get("mac_address")
+        if mac:
+            self._kill_blueman_connection(mac)
+
+        if self.device:
+            self.polling = False
+            asyncio.run_coroutine_threadsafe(self.device.disconnect(), self.loop)
+            self.device = None
+
+        self.connect_btn.config(state=tk.NORMAL)
+        self.disconnect_btn.config(state=tk.DISABLED)
+        self.update_status("Disconnected", "gray")
+        self.update_device_info(0, 0)
+        self.charge_start_times.clear()
+        self._last_table_values = []
+        self.update_table()
+        self.alarm_btn.config(text="🔊")
+
+    # ------------------------------------------------------------------
+    # Polling (Adaptive)
+    # ------------------------------------------------------------------
+
+    def start_polling(self):
+        """Starts the polling loop (automatically started after connection)."""
+        if not self.device or not self.device.connected:
+            self.log_message("⚠️ No device connected.")
+            return
+        if self.polling:
+            return
+        self.polling = True
+        interval = self.config.get("poll_interval", 5)
+        idle_interval = 10  # Longer pause when no slots are active
+        self.log_message(f"✅ Polling started (interval: {interval}s, idle: {idle_interval}s).....")
+        asyncio.run_coroutine_threadsafe(self._poll_loop(interval, idle_interval), self.loop)
+
+    async def _poll_loop(self, interval, idle_interval):
+        """
+        Asynchronous polling loop with adaptive interval.
+
+        Args:
+            interval: Normal polling interval in seconds (when slots are active)
+            idle_interval: Polling interval when no slots are active (longer = less traffic)
+        """
+        while self.polling and self.device and self.device.connected:
+            # poll_data() returns False if connection was lost
+            still_connected = await self.device.poll_data()
+            self.root.after(0, self.update_table)
+
+            if not still_connected:
+                self.polling = False
+                self.root.after(0, lambda: self.log_message("⚠️ Connection lost – reconnecting..."))
+                self.root.after(2000, self.connect_saved)
+                break
+
+            # Adaptive pause: longer when idle (no occupied slots)
+            if self.device._last_occupied_slots:
+                await asyncio.sleep(interval)
+            else:
+                await asyncio.sleep(idle_interval)
+
+        self.log_message("✅ Polling stopped")
+
+    # ------------------------------------------------------------------
+    # Display Helpers
+    # ------------------------------------------------------------------
+
+    def _format_time(self, seconds):
+        """
+        Formats seconds into a human‑readable time string.
+
+        Examples:
+        - 45s → "45s"
+        - 125s → "2m 5s"
+        - 3725s → "1h 2m"
+
+        Args:
+            seconds: Time in seconds (int or float)
+
+        Returns:
+            Formatted time string
+        """
+        if seconds < 0:
+            seconds = 0
+        if seconds < 60:
+            return f"{seconds:.0f}s"
+        elif seconds < 3600:
+            return f"{seconds//60:.0f}m {seconds%60:.0f}s"
+        else:
+            h = seconds // 3600
+            m = (seconds % 3600) // 60
+            return f"{h:.0f}h {m:.0f}m"
+
+    def _battery_bar(self, percent):
+        """
+        Creates a visual battery bar with 12 segments.
+
+        Format: ████████░░░░ 67%
+        - █ = filled segment
+        - ░ = empty segment
+
+        Args:
+            percent: Battery percentage (0–100)
+
+        Returns:
+            String with bar and percentage
+        """
+        if percent < 0:
+            percent = 0
+        if percent > 100:
+            percent = 100
+        filled = int(percent / 100 * 12)
+        empty = 12 - filled
+        return "█" * filled + "░" * empty + f" {percent:3d}%"
+
+    # ------------------------------------------------------------------
+    # Table Update (with GUI Caching)
+    # ------------------------------------------------------------------
+
+    def update_table(self):
+        """
+        Updates the data table – but only if data has actually changed.
+
+        This is a performance optimization: the table is only redrawn when
+        new data differs from the previous display. This reduces CPU usage
+        and prevents flickering.
+        """
+        new_values = []
+
+        # If not connected, clear the table (but only once)
+        if not self.device or not self.device.connected:
+            if self._last_table_values:
+                for item in self.tree.get_children():
+                    self.tree.delete(item)
+                self._last_table_values = []
+            return
+
+        # Read input voltage and current from Slot 1 (device‑wide values)
+        input_voltage_mV = 0
+        input_current_mA = 0
+        now = time.time()
+        elec1 = self.device.latest_data.get("slot1_electric", {})
+        if elec1.get("input_voltage_mV", 0) > 0:
+            input_voltage_mV = elec1["input_voltage_mV"]
+            input_current_mA = elec1.get("input_current_mA", 0)
+
+        # Build table rows for all 6 slots
+        for slot in range(1, 7):
+            work = self.device.latest_data.get(f"slot{slot}_workstate", {})
+            elec = self.device.latest_data.get(f"slot{slot}_electric", {})
+            ir = self.device.latest_data.get(f"slot{slot}_ir", {})
+
+            # Skip if no data for this slot
+            if not work and not elec and not ir:
+                continue
+
+            status = work.get("status_str", "unknown")
+            is_idle = status in ("idle", "empty") or work.get("status", 0) == 0
+
+            if is_idle:
+                # Empty slot – all values 0 / placeholder
+                voltage_V = 0.0
+                current_A = 0.0
+                capacity = 0
+                ir_val = 0
+                battery_type = "-"
+                capacity_percent = 0
+                charge_time_str = "--:--"
+                battery_display = "—"
+                if slot in self.charge_start_times:
+                    del self.charge_start_times[slot]
+            else:
+                # --- Voltage ---
+                voltage_mV = elec.get("voltage_mV", 0)
+                if voltage_mV == 0:
+                    voltage_mV = work.get("voltage_mV", 0)
+                voltage_V = voltage_mV / 1000.0
+
+                # --- Current ---
+                current_mA = work.get("work_current_mA", 0)
+                if current_mA == 0:
+                    current_mA = elec.get("charging_current_mA", 0)
+                current_A = current_mA / 1000.0
+
+                # --- Battery type ---
+                battery_type = work.get("battery_type_str", "unknown")
+
+                # --- Capacity ---
+                capacity_percent = work.get("capacity_percent", 0)
+                capacity = elec.get("capacity_mAh", work.get("capacity_mAh", 0))
+
+                # --- Internal resistance (rounded to integer) ---
+                ir_val = ir.get("ir_total_mohm", work.get("ir_mohm", 0))
+                if ir_val == 0 and "ir_values_mohm" in ir:
+                    ir_val = ir["ir_total_mohm"]
+                ir_val = round(ir_val)
+
+                # --- Charge time ---
+                # 1st attempt: Read from device (work_period_ms)
+                work_period_ms = work.get("work_period_ms", 0)
+                if work_period_ms > 0:
+                    charge_time_str = self._format_time(work_period_ms / 1000.0)
+                else:
+                    # 2nd attempt: Self‑calculated (fallback)
+                    is_charging = status in (
+                        "Pre-charge / trickle",
+                        "CC constant current",
+                        "Active charging",
+                        "CV constant voltage"
+                    ) or work.get("status", 0) in (1, 2, 3, 4)
+
+                    if is_charging:
+                        if slot not in self.charge_start_times:
+                            self.charge_start_times[slot] = now
+                        charge_time_str = self._format_time(now - self.charge_start_times[slot])
+                    else:
+                        if slot in self.charge_start_times:
+                            if status == "done" or status == "error":
+                                del self.charge_start_times[slot]
+                                charge_time_str = "done"
+                            else:
+                                charge_time_str = self._format_time(now - self.charge_start_times[slot]) + " (⏸️)"
+                        else:
+                            charge_time_str = "--:--"
+
+                # --- Battery bar ---
+                battery_display = self._battery_bar(capacity_percent)
+
+            # Build row tuple
+            row = (slot, status, battery_type, f"{voltage_V:.3f}", f"{current_A:.2f}",
+                   capacity, ir_val, charge_time_str, battery_display)
+            new_values.append(row)
+
+        # Only update if data has changed (GUI caching)
+        if new_values == self._last_table_values:
+            return
+
+        # Redraw table
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for row in new_values:
+            self.tree.insert("", tk.END, values=row)
+        self._last_table_values = new_values
+
+        # Update device info (input voltage, total power)
+        if input_voltage_mV > 0:
+            self.root.after(0, lambda: self.update_device_info(input_voltage_mV, input_current_mA))
+
+    # ------------------------------------------------------------------
+    # Slot Selection
+    # ------------------------------------------------------------------
+
+    def on_tree_select(self, event):
+        """
+        Called when a table row is clicked.
+
+        Automatically selects the corresponding slot in the dropdown
+        and loads the settings for that slot.
+        """
+        selection = self.tree.selection()
+        if selection:
+            item = selection[0]
+            values = self.tree.item(item, 'values')
+            if values:
+                slot = values[0]  # First column is "Slot"
+                self.slot_var.set(str(slot))
+                self.update_settings_fields()
+
+    def update_settings_fields(self):
+        """
+        Loads the current charging settings for the selected slot from the
+        latest WorkState data and populates the GUI fields.
+
+        This is called when:
+        - The slot dropdown changes
+        - A table row is clicked
+        - After successful connection (delayed)
+        """
+        if not self.device or not self.device.connected:
+            return
+        try:
+            slot = int(self.slot_var.get()) - 1
+            work = self.device.latest_data.get(f"slot{slot+1}_workstate", {})
+
+            # Only update if slot is active (not idle or error)
+            if work and work.get("status", 0) not in (0, 5):
+                # Battery type
+                batt_type = work.get("battery_type", -1)
+                if batt_type >= 0:
+                    inv_map = {v: k for k, v in BATTERY_TYPE_STR_TO_INT.items()}
+                    batt_str = inv_map.get(batt_type, "Auto")
+                    self.battery_type_var.set(batt_str)
+                    self._update_cutoff_state()  # Update cut‑off field state
+
+                # Charge current (mA)
+                current_mA = work.get("work_current_mA", 0)
+                if current_mA > 0:
+                    self.current_entry.delete(0, tk.END)
+                    self.current_entry.insert(0, str(current_mA))
+
+                # Capacity limit (mAh) – stored in max_output_power_mW by the app
+                capacity = work.get("max_output_power_mW", 0)
+                if capacity > 0:
+                    self.capacity_entry.delete(0, tk.END)
+                    self.capacity_entry.insert(0, str(capacity))
+
+                # Cut‑off voltage (mV) – only if field is enabled
+                if self.cutoff_entry.cget('state') != 'disabled':
+                    cutoff = work.get("full_charged_volt_mV", 0)
+                    if cutoff > 0:
+                        self.cutoff_entry.delete(0, tk.END)
+                        self.cutoff_entry.insert(0, str(cutoff))
+        except Exception:
+            pass  # Silently ignore errors
+
+    # ------------------------------------------------------------------
+    # Alarm Tone
+    # ------------------------------------------------------------------
+
+    async def _update_alarm_button(self):
+        """Fetches the current alarm tone state from the device and updates the button."""
+        if self.device and self.device.connected:
+            state = await self.device.get_alarm_tone()
+            if state is not None:
+                self.root.after(0, lambda: self.alarm_btn.config(text="🔊" if state else "🔇"))
+
+    def toggle_alarm_tone(self):
+        """Toggles the alarm tone on/off (button click)."""
+        if not self.device or not self.device.connected:
+            messagebox.showerror("Error", "No device connected.")
+            return
+        new_state = not self.device._alarm_tone_state
+        asyncio.run_coroutine_threadsafe(self._toggle_alarm_async(new_state), self.loop)
+
+    async def _toggle_alarm_async(self, new_state):
+        """Asynchronously sets the alarm tone."""
+        success = await self.device.set_alarm_tone(new_state)
+        if success:
+            self.root.after(0, lambda: self.alarm_btn.config(text="🔊" if new_state else "🔇"))
+            self.log_message(f"🔊 Alarm tone {'on' if new_state else 'off'}")
+        else:
+            self.root.after(0, lambda: self.log_message("⚠️ Failed to set alarm tone."))
+            self.device._alarm_tone_state = not new_state
+
+    # ------------------------------------------------------------------
+    # Device Scan
+    # ------------------------------------------------------------------
+
+    def scan_devices(self):
+        """Starts a BLE scan for ISDT devices (10 seconds)."""
+        if self.scanning:
+            return
+        self.scanning = True
+        self.scan_btn.config(state=tk.DISABLED)
+        self.scan_status.config(text="Searching...")
+        self.device_listbox.delete(0, tk.END)
+        self.log_message("🔎 Scanning for BLE devices (10 seconds)...")
+        asyncio.run_coroutine_threadsafe(self._scan_async(), self.loop)
+
+    async def _scan_async(self):
+        """Asynchronous BLE scan."""
+        from bleak import BleakScanner
+        devices = await BleakScanner.discover(timeout=10)
+        # Only show devices with a name (filters out unnamed BLE devices)
+        self.scanned_devices = [d for d in devices if d.name]
+        self.scanning = False
+        self.root.after(0, self._update_scan_results)
+
+    def _update_scan_results(self):
+        """Updates the device listbox with scan results."""
+        self.scan_btn.config(state=tk.NORMAL)
+        self.device_listbox.delete(0, tk.END)
+        for d in self.scanned_devices:
+            self.device_listbox.insert(tk.END, f"{d.name} ({d.address})")
+        self.scan_status.config(text=f"{len(self.scanned_devices)} devices found")
+        self.log_message(f"✅ {len(self.scanned_devices)} devices found.")
+        self.save_btn.config(state=tk.NORMAL if self.scanned_devices else tk.DISABLED)
+
+    def on_device_select(self, event):
+        """Called when a device is selected in the listbox."""
+        selection = self.device_listbox.curselection()
+        self.save_btn.config(state=tk.NORMAL if selection else tk.DISABLED)
+
+    def save_selected_device(self):
+        """Saves the selected device to the configuration."""
+        selection = self.device_listbox.curselection()
+        if not selection:
+            return
+        idx = selection[0]
+        device = self.scanned_devices[idx]
+
+        self.config["mac_address"] = device.address
+        self.config["device_name"] = device.name or ""
+        save_config(self.config)
+
+        self.settings_mac.delete(0, tk.END)
+        self.settings_mac.insert(0, device.address)
+        self.settings_name.delete(0, tk.END)
+        self.settings_name.insert(0, device.name or "")
+
+        self.log_message(f"✅ Saved: {device.name} ({device.address})")
+        messagebox.showinfo("Success", f"Device saved:\n{device.name}\n{device.address}")
+
+    # ------------------------------------------------------------------
+    # Save Settings
+    # ------------------------------------------------------------------
+
+    def save_settings(self):
+        """Saves settings from the 'Settings' tab to the config file."""
+        mac = self.settings_mac.get().strip()
+        name = self.settings_name.get().strip()
+        try:
+            interval = int(self.settings_interval.get().strip())
+            if interval < 1:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Error", "Please enter a valid number for the interval (≥ 1).")
+            return
+
+        self.config["mac_address"] = mac
+        self.config["device_name"] = name
+        self.config["poll_interval"] = interval
+        save_config(self.config)
+
+        self.log_message("✅ Settings saved.")
+        messagebox.showinfo("Success", "Settings saved.")
+
+    # ------------------------------------------------------------------
+    # Apply Settings (Send to Charger)
+    # ------------------------------------------------------------------
+
+    def apply_settings(self):
+        """
+        Called when the user clicks the "Apply" button.
+
+        Reads the values from the GUI, validates them against battery‑specific
+        limits, and sends them to the charger via set_worktask().
+
+        A beep confirms that the settings were sent.
+        """
+        if not self.device or not self.device.connected:
+            messagebox.showerror("Error", "No device connected.")
+            return
+        try:
+            slot = int(self.slot_var.get()) - 1
+            batt_str = self.battery_type_var.get()
+            batt_int = BATTERY_TYPE_STR_TO_INT.get(batt_str)
+            if batt_int is None:
+                raise ValueError(f"Unknown battery type: {batt_str}")
+            current_mA = int(self.current_entry.get())
+            capacity_mAh = int(self.capacity_entry.get())
+            cutoff_mV = int(self.cutoff_entry.get()) if self.cutoff_entry.cget('state') != 'disabled' else 0
+
+            # --- Battery‑specific validation ---
+            limits = BATTERY_LIMITS.get(batt_str)
+            if limits is None:
+                raise ValueError(f"Unknown battery type: {batt_str}")
+
+            # Capacity limit validation
+            cap_min = limits["capacity_min"]
+            cap_max = limits["capacity_max"]
+            if cap_min > 0 or cap_max > 0:
+                if capacity_mAh != 0 and (capacity_mAh < cap_min or capacity_mAh > cap_max):
+                    raise ValueError(
+                        f"Capacity limit for {batt_str} must be 0 (unlimited) or between {cap_min} and {cap_max} mAh."
+                    )
+
+            # Cut‑off validation (only if enabled for this battery type)
+            if limits["cutoff_enabled"]:
+                if cutoff_mV < limits["cutoff_min"] or cutoff_mV > limits["cutoff_max"]:
+                    raise ValueError(
+                        f"Cut‑off for {batt_str} must be between {limits['cutoff_min']} and {limits['cutoff_max']} mV."
+                    )
+            else:
+                if cutoff_mV != 0:
+                    raise ValueError(f"{batt_str} has no cut‑off setting. Please set it to 0.")
+                cutoff_mV = 0
+
+            # Current validation (global for all battery types)
+            if current_mA < CURRENT_MIN_MA or current_mA > CURRENT_MAX_MA:
+                raise ValueError(
+                    f"Current must be between {CURRENT_MIN_MA} mA (0.1 A) and {CURRENT_MAX_MA} mA (2.0 A)."
+                )
+
+            # Beep as confirmation
+            self.root.bell()
+
+            # Send the command asynchronously
+            asyncio.run_coroutine_threadsafe(
+                self.device.set_worktask(
+                    channel=slot,
+                    battery_type=batt_int,
+                    work_current_mA=current_mA,
+                    capacity_limit_mAh=capacity_mAh,
+                    full_changed_volt=cutoff_mV
+                ),
+                self.loop
+            )
+
+            self.log_message(f"⚡ Settings for Slot {slot+1} sent: "
+                             f"{batt_str}, {current_mA} mA, {capacity_mAh} mAh, cut‑off {cutoff_mV} mV")
+            messagebox.showinfo("Sent", f"Settings for Slot {slot+1} have been sent.")
+        except Exception as e:
+            messagebox.showerror("Input error", str(e))
+
+
+# ------------------------------------------------------------------
+# Application Entry Point
+# ------------------------------------------------------------------
+
+if __name__ == "__main__":
+    root = tk.Tk()
+
+    # Load icon from the same directory (optional)
+    import os
+    icon_path = os.path.join(os.path.dirname(__file__), 'icon.png')
+    try:
+        icon = tk.PhotoImage(file=icon_path)
+        root.iconphoto(True, icon)
+        root.icon_image = icon  # Keep reference so icon doesn't disappear
+    except Exception:
+        pass  # No icon – still start
+
+    app = ISDTGui(root)
+    root.mainloop()
