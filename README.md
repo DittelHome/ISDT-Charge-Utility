@@ -27,9 +27,9 @@ Monitor and control your charger with ease.
 ## ✨ Features
 
 ### 📊 Monitoring
-- **BLE Connection** – Direct communication with ISDT C4 Air
+- **BLE Connection** –  Direct communication with ISDT C4/A4/A8/NP2 Air
 - **Auto-Connect** – Saved MAC address is used on startup
-- **6 Channels (Slots)** – All charging data at a glance
+- **Automatic Model Detection** – Detects C4 Air (6 slots), A4 Air (4 slots), A8 Air (8 slots)
 - **Detailed Status** – Pre‑charge, CC, CV, done, error
 - **Charge Time** – Read directly from the device
 - **Battery Bar** – Visual representation of charge level
@@ -39,26 +39,26 @@ Monitor and control your charger with ease.
 - **Timeout Detection** – Detects when the device is powered off
 
 ### ⚡ Control
-- **Set Battery Type** – LiHV, LiIon, LiFe, NiZn, NiMH, LiIon 1.5V, Auto
-- **Set Charge Current** – 100–2000 mA (0.1–2.0 A)
+- **Set Battery Type** – Model-dependent:
+  - C4 Air: LiHV, LiIon, LiFe, NiZn, NiMh/NiCd, LiIon(1.5V), Auto
+  - A4 Air: NiMh/NiCd, LiIon, LiFe, Auto
+  - A8 Air: LiHV, NiMh/NiCd, LiIon, LiFe, Auto
+- **Set Charge Current** – 100–2000 mA (model-dependent maximum)
 - **Set Capacity Limit** – Battery‑specific ranges (0 = unlimited)
 - **Set Cut‑off Voltage** – Battery‑specific ranges (0 = default)
 - **Alarm Tone** – Toggle on/off with a single click (🔊/🔇)
-- **Battery‑specific Validation** – Prevents invalid values
 - **Persistent Settings** – MAC, device name, interval, Bind UUID are saved
 
 ---
 
 ## 🖥️ Supported Devices
 
-| Model       | Status                    |
-|-------------|---------------------------|
-| ISDT C4 Air | ✅ Tested (full support)  |
-| ISDT A8 Air | ⚠️ Theoretically compatible (read only) |
-| ISDT NP2 Air| ⚠️ Theoretically compatible (read only) |
-| ISDT MASS2  | ❌ Not supported          |
-
-> **Note:** This software was developed specifically for the C4 Air. Other models may work but have not been tested.
+| Model       | Slots | Max Current | Status                    |
+|-------------|-------|-------------|---------------------------|
+| ISDT C4 Air | 6     | 2000mA      | ✅ Fully supported        |
+| ISDT A4 Air | 4     | 1000mA      | ❓ Test outstanding (need testers) |
+| ISDT A8 Air | 8     | 1000mA      | ❓ Test outstanding (need testers) |
+| ISDT NP2 Air| 2     | 1500mA      | ❓ Test outstanding (need testers) |
 
 ---
 
@@ -180,8 +180,8 @@ sudo apt install python3-bleak
    - Use the **"Slot"** dropdown in the settings panel
 
 2. **Adjust values**
-   - **Battery type** – Choose from the dropdown
-   - **Current** – Enter value in mA (100–2000)
+   - **Battery type** – Choose from the dropdown (model-dependent)
+   - **Current** – Enter value in mA (100–2000, model-dependent maximum)
    - **Capacity limit** – Enter value in mAh (0 = unlimited)
    - **Cut‑off** – Enter value in mV (0 = default; only if supported for the selected battery type)
 
@@ -204,7 +204,7 @@ The tool validates your input based on the selected battery type. Invalid values
 | LiIon        | 0 or 2000–7000       | 4100–4300    |
 | LiFe         | 0 or 2000–7000       | 3550–3750    |
 | NiZn         | 0 or 2000–7000       | 1800–2000    |
-| NiMH         | 0 or 1000–4000       | 3–12 (Delta‑Peak) |
+| NiMh/Cd         | 0 or 1000–4000       | 3–12 (Delta‑Peak) |
 | LiIon(1.5V)  | 0 or 1000–4000       | none (0)     |
 | Auto         | 0 or 2000–7000       | none (0)     |
 
@@ -216,7 +216,7 @@ The tool validates your input based on the selected battery type. Invalid values
 |--------|-------------|
 | **Slot** | Channel number (1-6) |
 | **Status** | Charge state (idle, pre-charge, CC, CV, done, error) |
-| **Type** | Battery chemistry (NiMH, LiIon, LiFe, etc.) |
+| **Type** | Battery chemistry (NiMh/NiCd, LiIon, LiFe, etc.) |
 | **Voltage** | Current battery voltage in volts |
 | **Current** | Charge current in amperes |
 | **Capacity** | Charged capacity in mAh |
@@ -235,6 +235,7 @@ The tool validates your input based on the selected battery type. Invalid values
 | `isdt_protocol.py` | Protocol definitions and parsers |
 | `isdt_config.py` | Settings load/save |
 | `isdt_limits.py` | Battery‑specific validation limits (customizable) |
+| `isdt_models.py`	|Model definitions (C4/A4/A8 Air)|
 | `PROTOCOL.md` | Technical documentation of the BLE protocol |
 
 
@@ -306,6 +307,25 @@ The BLE protocol is based on the documentation from the [Home Assistant Integrat
 Python 3.14.7 (newest one) had problems (no BLE connect).
 
 The program works natively on both Linux and Windows.
+
+
+---
+## ⚠️ DISCLAIMER / HAFTUNGSAUSSCHLUSS
+
+**IMPORTANT - PLEASE READ CAREFULLY**
+
+This software is provided "AS IS" and "WITH ALL FAULTS" without warranty of any kind, express or implied. 
+
+**By using this software, you agree that:**
+
+1. **USE AT YOUR OWN RISK** – The author assumes NO responsibility or liability for any damages, injuries, or losses resulting from the use of this software.
+2. **BATTERY SAFETY** – Charging batteries incorrectly can cause fire, explosion, or personal injury. Always follow the battery manufacturer's safety guidelines.
+3. **NO GUARANTEE** – The software may contain bugs or errors. It is your responsibility to verify all settings before starting a charge.
+4. **HARDWARE DAMAGE** – The author is not liable for any damage to your charger, batteries, or other equipment.
+5. **NO WARRANTY** – This software comes with no warranty, express or implied. The entire risk of using the software is with you.
+
+**Du verwendest diese Software auf eigene Gefahr!**  
+Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder Personen.
 
 
 ---
