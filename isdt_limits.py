@@ -13,8 +13,6 @@ CURRENT_MIN_MA = 100
 CURRENT_MAX_MA = 2000
 
 # Battery‑specific limits
-# capacity: 0 = unlimited (no limit)
-# cutoff: 0 = no cut‑off condition (disabled)
 BATTERY_LIMITS = {
     "LiHV": {
         "capacity_min": 2000,
@@ -44,7 +42,7 @@ BATTERY_LIMITS = {
         "cutoff_max": 2000,
         "cutoff_enabled": True,
     },
-    "NiMH": {
+    "NiMh/NiCd": {
         "capacity_min": 1000,
         "capacity_max": 4000,
         "cutoff_min": 3,
@@ -60,7 +58,7 @@ BATTERY_LIMITS = {
     },
     "Auto": {
         "capacity_min": 0,
-        "capacity_max": 0,      # 0 means: no limit (everything allowed)
+        "capacity_max": 0,
         "cutoff_min": 0,
         "cutoff_max": 0,
         "cutoff_enabled": False,

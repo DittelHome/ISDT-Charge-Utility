@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-ISDT C4 Air – Monitor & Control
+ISDT Charger – Monitor & Control
 
-This is the main GUI application for the ISDT C4 Air charger.
-It provides real-time monitoring of all 6 charging slots and full control
+This is the main GUI application for ISDT C4/A4/A8 Air chargers.
+It provides real-time monitoring of all charging slots and full control
 over charging parameters (battery type, current, capacity limit, cut‑off).
+
+Supports: C4 Air, A4 Air, A8 Air, NP2 Air
 
 Key features:
 - BLE connection management (connect/disconnect/auto‑connect)
@@ -16,6 +18,7 @@ Key features:
 - Persistent configuration (MAC, device name, poll interval, bind UUID)
 - Adaptive polling (longer intervals when idle)
 - GUI caching (only redraws when data changes)
+- Automatic model detection
 
 Dependencies:
 - bleak (BLE library)
@@ -37,38 +40,27 @@ from isdt_ble import ISDTBLE
 from isdt_config import load_config, save_config
 from isdt_protocol import WORK_STATE_MAP, BATTERY_TYPE_MAP, BATTERY_TYPE_STR_TO_INT
 from isdt_limits import BATTERY_LIMITS, CURRENT_MIN_MA, CURRENT_MAX_MA
+from isdt_models import get_model_config, get_supported_battery_types
 
 
 class ISDTGui:
     """
-    Main GUI class for the ISDT C4 Air Charger Monitor.
-
-    Responsibilities:
-    - Build and manage the tkinter interface (tabs "Device" and "Settings")
-    - Manage BLE connection lifecycle (connect, disconnect, auto‑connect)
-    - Start/stop the polling loop for live data
-    - Display charging data in a table (6 slots)
-    - Control charging parameters (battery type, current, capacity limit, cut‑off)
-    - Toggle alarm tone
-    - Log messages to a scrollable text area
-    - Scan for BLE devices and persist settings
-
-    Architecture:
-    - BLE communication runs in a background asyncio event loop
-    - GUI updates are scheduled via root.after() to avoid blocking
-    - Polling interval adapts: shorter when slots are active, longer when idle
-    - Table updates only when data actually changes (GUI caching)
+    Main GUI class for the ISDT Charger Monitor.
+    
+    This class builds and manages the tkinter interface, handles BLE
+    connections, displays live data, and provides controls for charging
+    parameters. It automatically adapts to the connected charger model.
     """
 
     def __init__(self, root):
         """
         Constructor – initializes the GUI, loads config, and starts auto‑connection.
-
+        
         Args:
             root: The tkinter main window (tk.Tk())
         """
         self.root = root
-        self.root.title("ISDT C4 Air – Monitor & Control")
+        self.root.title("ISDT Charger – Monitor & Control")
 
         # Load saved configuration from ~/.isdt_gui_config.json
         self.config = load_config()
@@ -80,8 +72,12 @@ class ISDTGui:
         self.scanning = False          # Is a BLE scan currently running?
         self.polling = False           # Is the polling loop running?
         self.scanned_devices = []      # List of discovered BLE devices
-        self.charge_start_times = {}   # Fallback charge time per slot (if device doesn't send it)
+        self.charge_start_times = {}   # Fallback charge time per slot
         self._last_table_values = []   # GUI caching: last displayed rows
+
+        # Widget references for dynamic updates
+        self.slot_combo = None
+        self.battery_combo = None
 
         # Configure ttk styles
         style = ttk.Style()
@@ -104,7 +100,6 @@ class ISDTGui:
         self._build_settings_tab()
 
         # Start asyncio event loop in background thread
-        # BLE operations are async, GUI runs in main thread
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
@@ -112,8 +107,8 @@ class ISDTGui:
         # Auto-connect if MAC address is saved
         if self.config.get("mac_address"):
             mac = self.config.get("mac_address")
-            self._kill_blueman_connection(mac)   # Disconnect any existing Blueman connection
-            self.root.after(500, self.auto_connect)  # Connect after 500ms delay
+            self._kill_blueman_connection(mac)
+            self.root.after(500, self.auto_connect)
 
     def _run_loop(self):
         """Starts the asyncio event loop in the background thread."""
@@ -127,16 +122,19 @@ class ISDTGui:
     def _build_device_tab(self):
         """
         Builds the 'Device' tab – the main view.
-
+        
         Contains:
         - Status bar (connection status, input voltage, total power)
         - Control buttons (Connect, Disconnect, Alarm toggle)
+        - Model info label
         - Data table with 9 columns (Slot, Status, Type, Voltage, Current,
           Capacity, IR, Charge Time, Charge Level)
         - Slot Settings panel (battery type, current, capacity limit, cut‑off)
         - Log window for status messages
         """
-        # ---- Top bar ----
+        # ------------------------------------------------------------------
+        # Top bar
+        # ------------------------------------------------------------------
         frame_top = ttk.Frame(self.tab_device)
         frame_top.pack(pady=5, fill=tk.X)
 
@@ -163,15 +161,19 @@ class ISDTGui:
         self.alarm_btn = ttk.Button(frame_top, text="🔊", width=4, command=self.toggle_alarm_tone)
         self.alarm_btn.pack(side=tk.LEFT, padx=5)
 
-        # ---- Data table ----
-        # Note: "Energy (mWh)" column is intentionally omitted – the original app doesn't show it either
+        # Model info label (displays detected model)
+        self.model_label = ttk.Label(frame_top, text="Model: --", foreground="purple")
+        self.model_label.pack(side=tk.LEFT, padx=15)
+
+        # ------------------------------------------------------------------
+        # Data table
+        # ------------------------------------------------------------------
         columns = (
             "Slot", "Status", "Type", "Voltage (V)", "Current (A)",
             "Capacity (mAh)", "IR (mΩ)", "Charge Time", "Charge Level"
         )
         self.tree = ttk.Treeview(self.tab_device, columns=columns, show="headings")
 
-        # Column widths
         col_widths = {
             "Slot": 50, "Status": 150, "Type": 80, "Voltage (V)": 100,
             "Current (A)": 100, "Capacity (mAh)": 120,
@@ -185,44 +187,42 @@ class ISDTGui:
         # Click on table row → automatically select the slot and load settings
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
 
-        # ---- Slot Settings panel ----
+        # ------------------------------------------------------------------
+        # Slot Settings panel
+        # ------------------------------------------------------------------
         settings_frame = ttk.LabelFrame(self.tab_device, text="🔧 Slot Settings")
         settings_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        # Slot selection (1–6)
+        # Slot selection (1-6 default, will be dynamically updated)
         ttk.Label(settings_frame, text="Slot:").grid(row=0, column=0, padx=5, pady=5)
         self.slot_var = tk.StringVar(value="1")
-        slot_combo = ttk.Combobox(settings_frame, textvariable=self.slot_var,
-                                  values=[str(i) for i in range(1,7)], width=5)
-        slot_combo.grid(row=0, column=1, padx=5)
-        # When slot changes, load its settings
-        slot_combo.bind("<<ComboboxSelected>>", lambda e: self.update_settings_fields())
+        self.slot_combo = ttk.Combobox(settings_frame, textvariable=self.slot_var,
+                                       values=[str(i) for i in range(1, 7)], width=5)
+        self.slot_combo.grid(row=0, column=1, padx=5)
+        self.slot_combo.bind("<<ComboboxSelected>>", lambda e: self.update_settings_fields())
 
-        # Battery type dropdown (values from BATTERY_TYPE_STR_TO_INT)
+        # Battery type dropdown (will be dynamically updated based on model)
         ttk.Label(settings_frame, text="Battery type:").grid(row=0, column=2, padx=5)
         self.battery_type_var = tk.StringVar()
-        battery_combo = ttk.Combobox(settings_frame, textvariable=self.battery_type_var,
-                                     values=["LiHV", "LiIon", "LiFe", "NiZn", "NiMH", "LiIon(1.5V)", "Auto"],
-                                     width=12)
-        battery_combo.grid(row=0, column=3, padx=5)
-        battery_combo.set("Auto")  # Default
-        # When battery type changes, enable/disable cut‑off field accordingly
-        battery_combo.bind("<<ComboboxSelected>>", self._update_cutoff_state)
+        self.battery_combo = ttk.Combobox(settings_frame, textvariable=self.battery_type_var,
+                                          values=[], width=14)  # Empty, will be populated dynamically
+        self.battery_combo.grid(row=0, column=3, padx=5)
+        self.battery_combo.set("Auto")
+        self.battery_combo.bind("<<ComboboxSelected>>", self._update_cutoff_state)
 
-        # Charge current (mA) – 100–2000 mA range
+        # Charge current (mA) – 100–2000 mA range (validated per model)
         ttk.Label(settings_frame, text="Current (mA):").grid(row=0, column=4, padx=5)
         self.current_entry = ttk.Entry(settings_frame, width=8)
         self.current_entry.grid(row=0, column=5, padx=5)
         self.current_entry.insert(0, "1000")
 
-        # Capacity limit (mAh) – battery‑specific range, 0 = unlimited
+        # Capacity limit (mAh) – battery-specific range, 0 = unlimited
         ttk.Label(settings_frame, text="Capacity limit (mAh):").grid(row=0, column=6, padx=5)
         self.capacity_entry = ttk.Entry(settings_frame, width=8)
         self.capacity_entry.grid(row=0, column=7, padx=5)
         self.capacity_entry.insert(0, "2000")
 
-        # Cut‑off voltage (mV) – battery‑specific range, 0 = default
-        # Disabled for Auto and LiIon(1.5V) (no cut‑off possible)
+        # Cut‑off voltage (mV) – battery-specific range, 0 = default
         ttk.Label(settings_frame, text="Cut‑off (mV):").grid(row=0, column=8, padx=5)
         self.cutoff_entry = ttk.Entry(settings_frame, width=6)
         self.cutoff_entry.grid(row=0, column=9, padx=5)
@@ -232,7 +232,9 @@ class ISDTGui:
         set_btn = ttk.Button(settings_frame, text="Apply", style="Red.TButton", command=self.apply_settings)
         set_btn.grid(row=0, column=10, padx=10)
 
-        # ---- Log window ----
+        # ------------------------------------------------------------------
+        # Log window
+        # ------------------------------------------------------------------
         self.log = scrolledtext.ScrolledText(self.tab_device, height=6, state='disabled')
         self.log.pack(fill=tk.X, padx=10, pady=5)
 
@@ -297,6 +299,54 @@ class ISDTGui:
 
         save_settings_btn = ttk.Button(right_frame, text="Save settings", command=self.save_settings)
         save_settings_btn.pack(anchor=tk.W, pady=20)
+
+    # ------------------------------------------------------------------
+    # Model-specific GUI Updates
+    # ------------------------------------------------------------------
+
+    def update_gui_for_model(self):
+        """
+        Update GUI elements based on the detected model.
+        
+        This method is called after a successful connection and updates:
+        - Window title with model name
+        - Model label
+        - Slot dropdown values (1 to num_slots)
+        - Battery type dropdown with supported types
+        - Log message with model details
+        """
+        if not self.device or not self.device.connected:
+            return
+
+        model_key = self.device.model_key
+        model_config = self.device.model_config
+
+        # Update window title
+        self.root.title(f"ISDT {model_config['display_name']} – Monitor & Control")
+
+        # Update model label
+        self.model_label.config(text=f"Model: {model_config['display_name']}")
+
+        # Update slot dropdown
+        num_slots = model_config["slots"]
+        if self.slot_combo:
+            self.slot_combo['values'] = [str(i) for i in range(1, num_slots + 1)]
+            if int(self.slot_var.get()) > num_slots:
+                self.slot_var.set("1")
+
+        # Update battery type dropdown with supported types
+        supported_types = model_config["battery_types"]
+        if self.battery_combo:
+            self.battery_combo['values'] = supported_types
+            if self.battery_type_var.get() not in supported_types:
+                self.battery_type_var.set(supported_types[0] if supported_types else "Auto")
+
+        # Log model details
+        max_current = model_config["max_current_mA"]
+        self.log_message(f"📊 Model: {model_config['display_name']} ({num_slots} slots, max {max_current}mA)")
+
+        # Reset GUI cache for correct display
+        self._last_table_values = []
 
     # ------------------------------------------------------------------
     # Logging & Status Updates
@@ -384,20 +434,24 @@ class ISDTGui:
         Called by __init__ after a 500ms delay. Uses the saved MAC address.
         """
         mac = self.config.get("mac_address")
+        device_name = self.config.get("device_name", "")
         if mac:
             self.log_message(f"⏳ Auto-connecting to {mac} ...")
-            self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False, config=self.config)
+            self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False,
+                                  config=self.config, device_name=device_name)
             asyncio.run_coroutine_threadsafe(self._connect_async(), self.loop)
 
     def connect_saved(self):
         """Manual connection using the saved MAC address (button click)."""
         mac = self.config.get("mac_address")
+        device_name = self.config.get("device_name", "")
         if not mac:
             messagebox.showerror("Error", "No MAC address saved.")
             return
         self.log_message(f"⏳ Connecting to saved address {mac} ...")
         self._kill_blueman_connection(mac)
-        self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False, config=self.config)
+        self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False,
+                              config=self.config, device_name=device_name)
         asyncio.run_coroutine_threadsafe(self._connect_async(), self.loop)
 
     async def _connect_async(self):
@@ -416,10 +470,9 @@ class ISDTGui:
                 ))
                 self.root.after(0, lambda: self.connect_btn.config(state=tk.DISABLED))
                 self.root.after(0, lambda: self.disconnect_btn.config(state=tk.NORMAL))
+                self.root.after(0, self.update_gui_for_model)  # Update GUI for detected model
                 self.start_polling()
-                # After 1 second, load settings for the currently selected slot
                 self.root.after(1000, self.update_settings_fields)
-                # Update alarm button state
                 await self._update_alarm_button()
             else:
                 self.root.after(0, lambda: self.log_message("⚠️ Connection failed."))
@@ -453,6 +506,7 @@ class ISDTGui:
         self._last_table_values = []
         self.update_table()
         self.alarm_btn.config(text="🔊")
+        self.model_label.config(text="Model: --")
 
     # ------------------------------------------------------------------
     # Polling (Adaptive)
@@ -581,8 +635,10 @@ class ISDTGui:
             input_voltage_mV = elec1["input_voltage_mV"]
             input_current_mA = elec1.get("input_current_mA", 0)
 
-        # Build table rows for all 6 slots
-        for slot in range(1, 7):
+        # Build table rows for all slots (using detected model's slot count)
+        num_slots = self.device.num_slots
+
+        for slot in range(1, num_slots + 1):
             work = self.device.latest_data.get(f"slot{slot}_workstate", {})
             elec = self.device.latest_data.get(f"slot{slot}_electric", {})
             ir = self.device.latest_data.get(f"slot{slot}_ir", {})
@@ -726,8 +782,10 @@ class ISDTGui:
                 if batt_type >= 0:
                     inv_map = {v: k for k, v in BATTERY_TYPE_STR_TO_INT.items()}
                     batt_str = inv_map.get(batt_type, "Auto")
-                    self.battery_type_var.set(batt_str)
-                    self._update_cutoff_state()  # Update cut‑off field state
+                    # Only set if supported by the current model
+                    if batt_str in self.device.supported_battery_types:
+                        self.battery_type_var.set(batt_str)
+                        self._update_cutoff_state()
 
                 # Charge current (mA)
                 current_mA = work.get("work_current_mA", 0)
@@ -871,7 +929,7 @@ class ISDTGui:
         Called when the user clicks the "Apply" button.
 
         Reads the values from the GUI, validates them against battery‑specific
-        limits, and sends them to the charger via set_worktask().
+        and model-specific limits, and sends them to the charger via set_worktask().
 
         A beep confirms that the settings were sent.
         """
@@ -887,6 +945,20 @@ class ISDTGui:
             current_mA = int(self.current_entry.get())
             capacity_mAh = int(self.capacity_entry.get())
             cutoff_mV = int(self.cutoff_entry.get()) if self.cutoff_entry.cget('state') != 'disabled' else 0
+
+            # --- Model-specific validation ---
+            # Check if battery type is supported by this model
+            if batt_str not in self.device.supported_battery_types:
+                raise ValueError(
+                    f"Battery type {batt_str} is not supported by {self.device.model_key}.\n"
+                    f"Supported types: {', '.join(self.device.supported_battery_types)}"
+                )
+
+            # Check if current exceeds model maximum
+            if current_mA > self.device.max_current_mA:
+                raise ValueError(
+                    f"Current {current_mA}mA exceeds model maximum {self.device.max_current_mA}mA"
+                )
 
             # --- Battery‑specific validation ---
             limits = BATTERY_LIMITS.get(batt_str)
@@ -913,7 +985,7 @@ class ISDTGui:
                     raise ValueError(f"{batt_str} has no cut‑off setting. Please set it to 0.")
                 cutoff_mV = 0
 
-            # Current validation (global for all battery types)
+            # Global current validation
             if current_mA < CURRENT_MIN_MA or current_mA > CURRENT_MAX_MA:
                 raise ValueError(
                     f"Current must be between {CURRENT_MIN_MA} mA (0.1 A) and {CURRENT_MAX_MA} mA (2.0 A)."

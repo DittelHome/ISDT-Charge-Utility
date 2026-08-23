@@ -59,8 +59,8 @@ BATTERY_TYPE_MAP = {
     1: "LiIon",
     2: "LiFe",
     3: "NiZn",
-    4: "NiMH",
-    5: "LiIon",
+    4: "NiMh/NiCd",
+    5: "LiIon(1.5V)",
     6: "Auto",
 }
 
@@ -69,7 +69,7 @@ BATTERY_TYPE_STR_TO_INT = {
     "LiIon": 1,
     "LiFe": 2,
     "NiZn": 3,
-    "NiMH": 4,
+    "NiMh/NiCd": 4,
     "LiIon(1.5V)": 5,
     "Auto": 6,
 }
