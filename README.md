@@ -328,17 +328,3 @@ MIT License – see [LICENSE](LICENSE) file.
 **Note:** This is an independent community project and is not affiliated with, endorsed by, or sponsored by ISDT.
 ```
 
----
-
-## 📋 Zusammenfassung der Änderungen
-
-| Änderung | Beschreibung |
-|----------|--------------|
-| **Windows EXE** | Kein Python mehr nötig! Nur `.exe` downloaden und starten |
-| **Installation** | In zwei Abschnitte geteilt: EXE (Endnutzer) und Python (Entwickler) |
-| **Screenshots** | Platzhalter für Screenshots (müssen noch eingefügt werden) |
-| **Model Detection** | Dokumentation für automatische Modell-Erkennung |
-| **Project Structure** | `isdt_models.py` und `icon.png`/`icon.ico` hinzugefügt |
-| **Troubleshooting** | Windows-spezifische Hinweise ergänzt |
-
-Jetzt ist die README **fertig für GitHub Releases**! 🚀
