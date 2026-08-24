@@ -35,6 +35,18 @@ from tkinter import ttk, scrolledtext, messagebox
 import threading
 import time
 import subprocess
+import sys
+import os
+
+# ============================================================
+# WINDOWS TASKLEISTE ICON FIX
+# ============================================================
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ISDT.Charge.Utility")
+    except Exception:
+        pass
 
 from isdt_ble import ISDTBLE
 from isdt_config import load_config, save_config
@@ -1022,13 +1034,27 @@ if __name__ == "__main__":
 
     # Load icon from the same directory (optional)
     import os
-    icon_path = os.path.join(os.path.dirname(__file__), 'icon.png')
-    try:
-        icon = tk.PhotoImage(file=icon_path)
-        root.iconphoto(True, icon)
-        root.icon_image = icon  # Keep reference so icon doesn't disappear
-    except Exception:
-        pass  # No icon – still start
+    icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
+    
+    # Windows: iconbitmap für .ico (besseres Taskleisten-Icon)
+    if sys.platform == "win32":
+        try:
+            if os.path.exists(icon_path):
+                root.iconbitmap(default=icon_path)
+        except Exception:
+            pass
+    else:
+        # Linux/Mac: PNG mit PhotoImage (Pillow benötigt)
+        try:
+            png_path = os.path.join(os.path.dirname(__file__), 'icon.png')
+            if os.path.exists(png_path):
+                from PIL import Image, ImageTk
+                image = Image.open(png_path)
+                icon = ImageTk.PhotoImage(image)
+                root.iconphoto(True, icon)
+                root.icon_image = icon
+        except Exception:
+            pass
 
     app = ISDTGui(root)
     root.mainloop()
