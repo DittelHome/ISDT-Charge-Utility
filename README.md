@@ -92,18 +92,14 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 
 ### Windows (EXE - for end users)
 - **Windows 10 or 11** (with Bluetooth 4.0+)
-- **Bluetooth adapter** (built-in or USB)
 - **No Python installation required!**
 
 ### Windows (Python - for developers)
 - **Python 3.13 or higher** 
-- `pip install bleak`
 
 ### Linux
-- **Linux** (tested on Ubuntu/Debian Mint)
+- **Linux** (with Bluetooth 4.0+)
 - **Python 3.13 or higher**
-- `pip install bleak`
-- **BlueZ** – Linux Bluetooth stack
 
 ---
 
@@ -219,7 +215,6 @@ python3 isdt.py
 | `isdt_ble.py` | BLE communication (connection, polling, control) |
 | `isdt_protocol.py` | Protocol definitions and parsers |
 | `isdt_config.py` | Settings load/save |
-| `isdt_limits.py` | Battery‑specific validation limits |
 | `isdt_models.py` | Model definitions (C4/A4/A8 Air) |
 | `icon.png` / `icon.ico` | Application icon |
 | `ISDT-Charge-Utility.exe` | Windows executable |
