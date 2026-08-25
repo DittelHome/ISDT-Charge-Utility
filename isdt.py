@@ -124,7 +124,7 @@ class ISDTGui:
         # Auto-connect if MAC address is saved
         if self.config.get("mac_address"):
             mac = self.config.get("mac_address")
-            self._kill_blueman_connection(mac)
+            self._release_ble_connection(mac)
             self.root.after(500, self.auto_connect)
 
     def _run_loop(self):
@@ -399,23 +399,30 @@ class ISDTGui:
     # Bluetooth Helpers
     # ------------------------------------------------------------------
 
-    def _kill_blueman_connection(self, mac):
+    def _release_ble_connection(self, mac):
         """
-        Disconnects an active Blueman connection to the given MAC address.
+        Best-effort release of a system-held BLE connection before connect.
 
-        Blueman sometimes keeps the connection active and blocks BLE access.
-        This function releases the connection so that bleak can use it.
-
-        Args:
-            mac: MAC address of the device
+        Linux: uses bluetoothctl (helps when Blueman holds the link).
+        Windows: no reliable CLI disconnect – logs a short tip instead.
         """
         if not mac:
             return
         try:
-            subprocess.run(["bluetoothctl", "disconnect", mac], capture_output=True, timeout=3)
-            time.sleep(0.3)  # Wait for the disconnection to settle
+            if sys.platform == "linux":
+                subprocess.run(
+                    ["bluetoothctl", "disconnect", mac],
+                    capture_output=True,
+                    timeout=3,
+                )
+                time.sleep(0.3)
+            elif sys.platform == "win32":
+                self.log_message(
+                    "💡 Windows: If connect fails, close ISD Link and disconnect "
+                    "the device under Settings → Bluetooth."
+                )
         except Exception:
-            pass  # Ignore errors – not critical
+            pass
 
     # ------------------------------------------------------------------
     # Cut‑off Field State
@@ -485,7 +492,7 @@ class ISDTGui:
             messagebox.showerror("Error", "No MAC address saved.")
             return
         self.log_message(f"⏳ Connecting to saved address {mac} ...")
-        self._kill_blueman_connection(mac)
+        self._release_ble_connection(mac)
         self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False,
                               config=self.config, device_name=device_name)
         asyncio.run_coroutine_threadsafe(self._connect_async(), self.loop)
