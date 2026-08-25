@@ -240,10 +240,14 @@ class ISDTGui:
         self.capacity_entry.insert(0, "2000")
 
         # Cut‑off voltage (mV) – battery-specific range, 0 = default
-        ttk.Label(settings_frame, text="Cut‑off (mV):").grid(row=0, column=8, padx=5)
+        # Values < 6 mV → label "Cut-off (ΔmV)", otherwise "Cut-off (mV)"
+        self.cutoff_label = ttk.Label(settings_frame, text="Cut‑off (mV):")
+        self.cutoff_label.grid(row=0, column=8, padx=5)
         self.cutoff_entry = ttk.Entry(settings_frame, width=6)
         self.cutoff_entry.grid(row=0, column=9, padx=5)
         self.cutoff_entry.insert(0, "5")
+        self.cutoff_entry.bind("<KeyRelease>", self._update_cutoff_delta_label)
+        self.cutoff_entry.bind("<FocusOut>", self._update_cutoff_delta_label)
 
         # Apply button – red, bold, sends settings to charger
         set_btn = ttk.Button(settings_frame, text="Apply", style="Red.TButton", command=self.apply_settings)
@@ -437,6 +441,26 @@ class ISDTGui:
             return (limits["cutoff_min"] + limits["cutoff_max"]) // 2
         return 0
 
+    def _update_cutoff_delta_label(self, event=None):
+        """Label shows Cut-off (ΔmV) when value is < 6 mV (delta-V mode)."""
+        if not hasattr(self, "cutoff_label"):
+            return
+        try:
+            if self.cutoff_entry.cget("state") == "disabled":
+                self.cutoff_label.config(text="Cut‑off (mV):")
+                return
+            raw = self.cutoff_entry.get().strip()
+            if raw == "":
+                self.cutoff_label.config(text="Cut‑off (mV):")
+                return
+            val = int(raw)
+            if 0 < val < 6:
+                self.cutoff_label.config(text="Cut‑off (ΔmV):")
+            else:
+                self.cutoff_label.config(text="Cut‑off (mV):")
+        except ValueError:
+            self.cutoff_label.config(text="Cut‑off (mV):")
+
     def _update_cutoff_state(self, event=None):
         """
         Enables or disables the cut‑off field based on the selected battery type.
@@ -458,6 +482,7 @@ class ISDTGui:
                 default_cutoff = self._get_default_cutoff(batt_str)
                 self.cutoff_entry.delete(0, tk.END)
                 self.cutoff_entry.insert(0, str(default_cutoff))
+        self._update_cutoff_delta_label()
 
     # ------------------------------------------------------------------
     # Connection Management
@@ -781,8 +806,7 @@ class ISDTGui:
         """
         Called when a table row is clicked.
 
-        Automatically selects the corresponding slot in the dropdown
-        and loads the settings for that slot.
+        Selects the slot and loads settings from WorkState (and table Type).
         """
         selection = self.tree.selection()
         if selection:
@@ -791,22 +815,25 @@ class ISDTGui:
             if values:
                 slot = values[0]  # First column is "Slot"
                 self.slot_var.set(str(slot))
+                # Prefer battery type shown in the table (column "Type")
+                if len(values) > 2 and values[2] and values[2] != "--":
+                    batt_str = values[2]
+                    if self.device and batt_str in getattr(self.device, "supported_battery_types", []):
+                        self.battery_type_var.set(batt_str)
+                        self._update_cutoff_state()
                 self.update_settings_fields()
 
     def update_settings_fields(self):
         """
-        Loads the current charging settings for the selected slot from the
-        latest WorkState data and populates the GUI fields.
+        Loads charging settings for the selected slot from latest WorkState.
 
-        Called when the slot dropdown changes, a table row is clicked, or
-        after successful connection. Also fills fields for idle slots when
-        the charger still reports parameters (not only when a battery is in).
+        Also works for idle slots when the charger still reports parameters.
         """
         if not self.device or not self.device.connected:
             return
         try:
             slot = int(self.slot_var.get()) - 1
-            work = self.device.latest_data.get(f"slot{slot+1}_workstate", {})
+            work = self.device.latest_data.get(f"slot{slot + 1}_workstate", {})
             if not work:
                 return
 
@@ -819,29 +846,33 @@ class ISDTGui:
                     self.battery_type_var.set(batt_str)
                     self._update_cutoff_state()
 
-            # Charge current (mA)
+            # Configured charge current (mA)
             current_mA = work.get("work_current_mA", 0)
             if current_mA > 0:
                 self.current_entry.delete(0, tk.END)
                 self.current_entry.insert(0, str(current_mA))
 
-            # Capacity limit (mAh) – stored in max_output_power_mW field
+            # Capacity limit (mAh)
             capacity = work.get("max_output_power_mW", 0)
             if capacity > 0:
                 self.capacity_entry.delete(0, tk.END)
                 self.capacity_entry.insert(0, str(capacity))
 
-            # Cut-off voltage (mV) – only if field is enabled
-            if self.cutoff_entry.cget('state') != 'disabled':
+            # Cut-off voltage (mV)
+            if self.cutoff_entry.cget("state") != "disabled":
                 cutoff = work.get("full_charged_volt_mV", 0)
                 if cutoff > 0:
                     self.cutoff_entry.delete(0, tk.END)
                     self.cutoff_entry.insert(0, str(cutoff))
+
+            if hasattr(self, "_update_cutoff_delta_label"):
+                self._update_cutoff_delta_label()
         except Exception as e:
             self.log_message(f"⚠️ update_settings_fields error: {e}")
 
     # ------------------------------------------------------------------
     # Alarm Tone
+
     # ------------------------------------------------------------------
 
     async def _update_alarm_button(self):
