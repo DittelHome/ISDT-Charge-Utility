@@ -23,16 +23,16 @@ CMD_BIND_RESP = 0x19
 # ------------------------------------------------------------------
 # AF01 Commands (Data Polling & Control)
 # ------------------------------------------------------------------
-CMD_WORKSTATE = bytes([0x13, 0xE6])          # Query charge state
-CMD_ELECTRIC = bytes([0x12, 0xE4])           # Query voltages/currents
-CMD_IR = bytes([0x13, 0xFA])                 # Query internal resistance
-CMD_WORKTASKS_REQ = 0xEA                     # Set charging parameters
+CMD_WORKSTATE = bytes([0x13, 0xE6])
+CMD_ELECTRIC = bytes([0x12, 0xE4])
+CMD_IR = bytes([0x13, 0xFA])
+CMD_WORKTASKS_REQ = 0xEA
 
 # Alarm tone
-CMD_ALARM_TONE_REQ = bytes([0x12, 0x92])     # Query alarm tone state
-CMD_ALARM_TONE_RESP = 0x93                   # Alarm tone response
-CMD_ALARM_TONE_TASK_REQ = bytes([0x13, 0x9C]) # Set alarm tone
-CMD_ALARM_TONE_TASK_RESP = 0x9D              # Alarm tone set confirmation
+CMD_ALARM_TONE_REQ = bytes([0x12, 0x92])
+CMD_ALARM_TONE_RESP = 0x93
+CMD_ALARM_TONE_TASK_REQ = bytes([0x13, 0x9C])
+CMD_ALARM_TONE_TASK_RESP = 0x9D
 
 # ------------------------------------------------------------------
 # Response Opcodes
@@ -46,10 +46,10 @@ RESP_IR = 0xFB
 # ------------------------------------------------------------------
 WORK_STATE_MAP = {
     0: "idle",
-    1: "Pre-charge / trickle",
-    2: "CC constant current",
-    3: "Active charging",
-    4: "CV constant voltage",
+    1: "Pre-charge",
+    2: "CC charge",
+    3: "Active",
+    4: "CV charge",
     5: "error",
     6: "done",
 }
@@ -64,22 +64,11 @@ BATTERY_TYPE_MAP = {
     6: "Auto",
 }
 
-BATTERY_TYPE_STR_TO_INT = {
-    "LiHV": 0,
-    "LiIon": 1,
-    "LiFe": 2,
-    "NiZn": 3,
-    "NiMh/NiCd": 4,
-    "LiIon(1.5V)": 5,
-    "Auto": 6,
-}
-
 # ------------------------------------------------------------------
 # Parsers
 # ------------------------------------------------------------------
 
 def parse_hardware_info(data: bytes) -> dict | None:
-    """Parse HardwareInfoResp (0xE1)."""
     if len(data) < 13 or data[0] != CMD_HW_INFO_RESP:
         return None
     return {
@@ -90,8 +79,7 @@ def parse_hardware_info(data: bytes) -> dict | None:
 
 
 def parse_workstate(data: bytes) -> dict | None:
-    """Parse WorkStateResp (0xE7)."""
-    if len(data) < 28 or data[1] != RESP_WORKSTATE:
+    if len(data) < 36 or data[1] != RESP_WORKSTATE:
         return None
     return {
         "channel": data[2],
@@ -110,7 +98,6 @@ def parse_workstate(data: bytes) -> dict | None:
 
 
 def parse_electric(data: bytes) -> dict | None:
-    """Parse ElectricResp (0xE5)."""
     if len(data) < 12 or data[1] != RESP_ELECTRIC:
         return None
     channel = data[2]
@@ -157,7 +144,6 @@ def parse_electric(data: bytes) -> dict | None:
 
 
 def parse_ir(data: bytes) -> dict | None:
-    """Parse IRResp (0xFB)."""
     if len(data) < 4 or data[1] != RESP_IR:
         return None
     channel = data[2]
@@ -177,14 +163,12 @@ def parse_ir(data: bytes) -> dict | None:
 
 
 def parse_alarm_tone(data: bytes) -> bool | None:
-    """Parse AlarmToneResp (0x93) – returns True if on, False if off."""
     if len(data) < 3 or data[1] != CMD_ALARM_TONE_RESP:
         return None
     return data[2] != 0
 
 
 def parse_charger_responses(data: bytes) -> dict:
-    """Auto‑detect and parse any charger response."""
     if len(data) < 2:
         return {}
     cmd = data[1]
@@ -198,5 +182,4 @@ def parse_charger_responses(data: bytes) -> dict:
 
 
 def build_command(cmd_bytes: bytes, slot: int) -> bytes:
-    """Build a command with channel byte (0‑based)."""
     return cmd_bytes + bytes([slot - 1])

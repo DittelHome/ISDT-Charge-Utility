@@ -97,6 +97,7 @@ class ISDTBLE:
         self.config = config or {}
         self._bind_response = None
         self._device_name = device_name or ""
+        self.loop = None  # Will be set in connect() when event loop is running
 
         # ------------------------------------------------------------------
         # Model Detection (Primary: Device Name)
@@ -143,10 +144,25 @@ class ISDTBLE:
         
         Notifications are received on both AF01 and AF02 characteristics.
         They are placed in a queue for processing by the polling loop.
+        
+        Uses call_soon_threadsafe to safely put data into the queue from the
+        Bleak callback thread.
         """
         if self.debug:
             self._log(f"📩 Notification: {data.hex()}")
-        asyncio.create_task(self.notification_queue.put(bytes(data)))
+        
+        # Thread-safe way to add to queue from Bleak callback thread
+        try:
+            if self.loop and self.loop.is_running():
+                self.loop.call_soon_threadsafe(
+                    self.notification_queue.put_nowait, bytes(data)
+                )
+            else:
+                # Fallback: create a task (less safe but works in some cases)
+                asyncio.create_task(self.notification_queue.put(bytes(data)))
+        except Exception as e:
+            if self.debug:
+                self._log(f"⚠️ Notification handler error: {e}")
 
     async def _send_command_and_wait(self, cmd: bytes, expected_opcode: int, timeout: float = 2.0) -> bytes | None:
         """
@@ -297,9 +313,7 @@ class ISDTBLE:
         if not self.bind_done:
             self._log("⚠️ No bind confirmation.", force=True)
 
-        # ------------------------------------------------------------------
-        # Step 3: Log Model Information
-        # ------------------------------------------------------------------
+        # After bind is complete, model detection is final
         if self.model_detected:
             self._log(f"📊 Model: {self.model_key} with {self.num_slots} slots", force=True)
             self._log(f"📊 Max current: {self.max_current_mA} mA", force=True)
@@ -328,6 +342,9 @@ class ISDTBLE:
         Returns:
             True if connection successful, False otherwise
         """
+        # Store the event loop for thread-safe notifications
+        self.loop = asyncio.get_running_loop()
+        
         attempt = 0
         while attempt <= retries:
             try:
@@ -383,6 +400,9 @@ class ISDTBLE:
         Returns:
             Parsed dictionary or None on failure
         """
+        if not self.connected or not self.client:
+            return None
+            
         cmd = build_command(CMD_WORKSTATE, slot)
         try:
             await self.client.write_gatt_char(CHAR_UUID_AF01, cmd)
@@ -416,6 +436,9 @@ class ISDTBLE:
         Returns:
             Parsed dictionary or None on failure
         """
+        if not self.connected or not self.client:
+            return None
+            
         cmd = build_command(CMD_ELECTRIC, slot)
         try:
             await self.client.write_gatt_char(CHAR_UUID_AF01, cmd)
@@ -446,6 +469,9 @@ class ISDTBLE:
         Returns:
             Parsed dictionary or None on failure
         """
+        if not self.connected or not self.client:
+            return None
+            
         cmd = build_command(CMD_IR, slot)
         try:
             await self.client.write_gatt_char(CHAR_UUID_AF01, cmd)
@@ -618,7 +644,7 @@ class ISDTBLE:
     async def set_worktask(self, channel: int, battery_type: int,
                            work_current_mA: int, capacity_limit_mAh: int,
                            task_type: int = 0, linking_type: int = 0,
-                           cells: int = 0, full_changed_volt: int = 0) -> bool:
+                           cells: int = 0, full_charged_volt: int = 0) -> bool:
         """
         Set charging parameters for a slot.
         
@@ -634,7 +660,7 @@ class ISDTBLE:
             task_type: 0 = charge (default)
             linking_type: 0 (default)
             cells: Number of cells (0 = auto-detect)
-            full_changed_volt: Cut-off voltage in mV (0 = default)
+            full_charged_volt: Cut-off voltage in mV (0 = default)
             
         Returns:
             True on success, False on error
@@ -658,7 +684,7 @@ class ISDTBLE:
         cmd.append(linking_type & 0xFF)            # Linking type
         cmd.extend(work_current_mA.to_bytes(4, 'little'))  # Current in mA
         cmd.append(cells & 0xFF)                   # Cell count (0 = auto)
-        cmd.extend(full_changed_volt.to_bytes(2, 'little')) # Cut-off voltage
+        cmd.extend(full_charged_volt.to_bytes(2, 'little')) # Cut-off voltage
         cmd.extend(capacity_limit_mAh.to_bytes(4, 'little')) # Capacity limit
 
         try:

@@ -50,9 +50,14 @@ if sys.platform == "win32":
 
 from isdt_ble import ISDTBLE
 from isdt_config import load_config, save_config
-from isdt_protocol import WORK_STATE_MAP, BATTERY_TYPE_MAP, BATTERY_TYPE_STR_TO_INT
-from isdt_limits import BATTERY_LIMITS, CURRENT_MIN_MA, CURRENT_MAX_MA
-from isdt_models import get_model_config, get_supported_battery_types
+from isdt_protocol import WORK_STATE_MAP
+from isdt_models import (
+    get_model_config,
+    BATTERY_LIMITS,
+    CURRENT_MIN_MA,
+    CURRENT_MAX_MA,
+    BATTERY_TYPE_STR_TO_INT,
+)
 
 
 class ISDTGui:
@@ -416,6 +421,22 @@ class ISDTGui:
     # Cut‑off Field State
     # ------------------------------------------------------------------
 
+    def _get_default_cutoff(self, batt_str: str) -> int:
+        """
+        Get default cut-off value for a battery type.
+        
+        Args:
+            batt_str: Battery type string (e.g., "LiHV", "NiMh/NiCd")
+            
+        Returns:
+            Default cut-off value in mV, or 0 if not supported
+        """
+        limits = BATTERY_LIMITS.get(batt_str)
+        if limits and limits["cutoff_enabled"]:
+            # Return the middle of the allowed range as default
+            return (limits["cutoff_min"] + limits["cutoff_max"]) // 2
+        return 0
+
     def _update_cutoff_state(self, event=None):
         """
         Enables or disables the cut‑off field based on the selected battery type.
@@ -431,9 +452,12 @@ class ISDTGui:
             self.cutoff_entry.insert(0, "0")
         else:
             self.cutoff_entry.config(state='normal')
-            if self.cutoff_entry.get() == "0":
+            # Set a sensible default if field is empty or "0"
+            current_value = self.cutoff_entry.get()
+            if current_value == "0" or current_value == "":
+                default_cutoff = self._get_default_cutoff(batt_str)
                 self.cutoff_entry.delete(0, tk.END)
-                self.cutoff_entry.insert(0, "5")
+                self.cutoff_entry.insert(0, str(default_cutoff))
 
     # ------------------------------------------------------------------
     # Connection Management
@@ -501,11 +525,9 @@ class ISDTGui:
 
         Stops polling, disconnects BLE, clears the table, and resets buttons.
         """
-        mac = self.config.get("mac_address")
-        if mac:
-            self._kill_blueman_connection(mac)
-
+        # Immediately mark as disconnected to prevent further polling
         if self.device:
+            self.device.connected = False
             self.polling = False
             asyncio.run_coroutine_threadsafe(self.device.disconnect(), self.loop)
             self.device = None
@@ -805,7 +827,10 @@ class ISDTGui:
                     self.current_entry.delete(0, tk.END)
                     self.current_entry.insert(0, str(current_mA))
 
-                # Capacity limit (mAh) – stored in max_output_power_mW by the app
+                # Capacity limit (mAh) – stored in max_output_power_mW field
+                # Note: The charger stores the capacity limit in the WorkState
+                # field that is parsed as max_output_power_mW in the protocol.
+                # This is the actual capacity limit value from the device.
                 capacity = work.get("max_output_power_mW", 0)
                 if capacity > 0:
                     self.capacity_entry.delete(0, tk.END)
@@ -817,8 +842,8 @@ class ISDTGui:
                     if cutoff > 0:
                         self.cutoff_entry.delete(0, tk.END)
                         self.cutoff_entry.insert(0, str(cutoff))
-        except Exception:
-            pass  # Silently ignore errors
+        except Exception as e:
+            self.log_message(f"⚠️ update_settings_fields error: {e}")
 
     # ------------------------------------------------------------------
     # Alarm Tone
@@ -1007,20 +1032,29 @@ class ISDTGui:
             self.root.bell()
 
             # Send the command asynchronously
-            asyncio.run_coroutine_threadsafe(
+            future = asyncio.run_coroutine_threadsafe(
                 self.device.set_worktask(
                     channel=slot,
                     battery_type=batt_int,
                     work_current_mA=current_mA,
                     capacity_limit_mAh=capacity_mAh,
-                    full_changed_volt=cutoff_mV
+                    full_charged_volt=cutoff_mV
                 ),
                 self.loop
             )
 
-            self.log_message(f"⚡ Settings for Slot {slot+1} sent: "
-                             f"{batt_str}, {current_mA} mA, {capacity_mAh} mAh, cut‑off {cutoff_mV} mV")
-            messagebox.showinfo("Sent", f"Settings for Slot {slot+1} have been sent.")
+            try:
+                success = future.result(timeout=5.0)
+                if success:
+                    self.log_message(f"⚡ Settings for Slot {slot+1} sent: "
+                                     f"{batt_str}, {current_mA} mA, {capacity_mAh} mAh, cut‑off {cutoff_mV} mV")
+                    messagebox.showinfo("Sent", f"Settings for Slot {slot+1} have been sent.")
+                else:
+                    raise Exception("Charger rejected the settings")
+            except Exception as e:
+                self.log_message(f"⚠️ Failed to send settings: {e}")
+                messagebox.showerror("Error", f"Failed to send settings: {e}")
+
         except Exception as e:
             messagebox.showerror("Input error", str(e))
 

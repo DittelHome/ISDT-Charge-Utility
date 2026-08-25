@@ -8,6 +8,9 @@ This file contains all model-specific settings including:
 - Supported battery types
 - Display names
 - Device name patterns for auto-detection
+- Battery type mappings
+- Battery-specific validation limits
+- Global current limits
 
 Author: Klaus Voigt
 """
@@ -248,17 +251,3 @@ def detect_model_from_bind_response(bind_response: bytes) -> str:
             return "NP2 Air"
     
     return "C4 Air"
-
-
-def get_supported_battery_types(model_key: str) -> List[str]:
-    """
-    Get the list of supported battery types for a model.
-    
-    Args:
-        model_key: The model identifier
-        
-    Returns:
-        List of battery type strings (including "Auto")
-    """
-    config = get_model_config(model_key)
-    return config.get("battery_types", [])
