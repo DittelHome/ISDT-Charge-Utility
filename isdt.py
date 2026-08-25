@@ -124,7 +124,7 @@ class ISDTGui:
         # Auto-connect if MAC address is saved
         if self.config.get("mac_address"):
             mac = self.config.get("mac_address")
-            self._release_ble_connection(mac)
+            self._kill_blueman_connection(mac)
             self.root.after(500, self.auto_connect)
 
     def _run_loop(self):
@@ -399,30 +399,23 @@ class ISDTGui:
     # Bluetooth Helpers
     # ------------------------------------------------------------------
 
-    def _release_ble_connection(self, mac):
+    def _kill_blueman_connection(self, mac):
         """
-        Best-effort release of a system-held BLE connection before connect.
+        Disconnects an active Blueman connection to the given MAC address.
 
-        Linux: uses bluetoothctl (helps when Blueman holds the link).
-        Windows: no reliable CLI disconnect – logs a short tip instead.
+        Blueman sometimes keeps the connection active and blocks BLE access.
+        This function releases the connection so that bleak can use it.
+
+        Args:
+            mac: MAC address of the device
         """
         if not mac:
             return
         try:
-            if sys.platform == "linux":
-                subprocess.run(
-                    ["bluetoothctl", "disconnect", mac],
-                    capture_output=True,
-                    timeout=3,
-                )
-                time.sleep(0.3)
-            elif sys.platform == "win32":
-                self.log_message(
-                    "💡 Windows: If connect fails, close ISD Link and disconnect "
-                    "the device under Settings → Bluetooth."
-                )
+            subprocess.run(["bluetoothctl", "disconnect", mac], capture_output=True, timeout=3)
+            time.sleep(0.3)  # Wait for the disconnection to settle
         except Exception:
-            pass
+            pass  # Ignore errors – not critical
 
     # ------------------------------------------------------------------
     # Cut‑off Field State
@@ -492,7 +485,7 @@ class ISDTGui:
             messagebox.showerror("Error", "No MAC address saved.")
             return
         self.log_message(f"⏳ Connecting to saved address {mac} ...")
-        self._release_ble_connection(mac)
+        self._kill_blueman_connection(mac)
         self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False,
                               config=self.config, device_name=device_name)
         asyncio.run_coroutine_threadsafe(self._connect_async(), self.loop)
@@ -805,50 +798,45 @@ class ISDTGui:
         Loads the current charging settings for the selected slot from the
         latest WorkState data and populates the GUI fields.
 
-        This is called when:
-        - The slot dropdown changes
-        - A table row is clicked
-        - After successful connection (delayed)
+        Called when the slot dropdown changes, a table row is clicked, or
+        after successful connection. Also fills fields for idle slots when
+        the charger still reports parameters (not only when a battery is in).
         """
         if not self.device or not self.device.connected:
             return
         try:
             slot = int(self.slot_var.get()) - 1
             work = self.device.latest_data.get(f"slot{slot+1}_workstate", {})
+            if not work:
+                return
 
-            # Only update if slot is active (not idle or error)
-            if work and work.get("status", 0) not in (0, 5):
-                # Battery type
-                batt_type = work.get("battery_type", -1)
-                if batt_type >= 0:
-                    inv_map = {v: k for k, v in BATTERY_TYPE_STR_TO_INT.items()}
-                    batt_str = inv_map.get(batt_type, "Auto")
-                    # Only set if supported by the current model
-                    if batt_str in self.device.supported_battery_types:
-                        self.battery_type_var.set(batt_str)
-                        self._update_cutoff_state()
+            # Battery type
+            batt_type = work.get("battery_type", -1)
+            if batt_type >= 0:
+                inv_map = {v: k for k, v in BATTERY_TYPE_STR_TO_INT.items()}
+                batt_str = inv_map.get(batt_type, "Auto")
+                if batt_str in self.device.supported_battery_types:
+                    self.battery_type_var.set(batt_str)
+                    self._update_cutoff_state()
 
-                # Charge current (mA)
-                current_mA = work.get("work_current_mA", 0)
-                if current_mA > 0:
-                    self.current_entry.delete(0, tk.END)
-                    self.current_entry.insert(0, str(current_mA))
+            # Charge current (mA)
+            current_mA = work.get("work_current_mA", 0)
+            if current_mA > 0:
+                self.current_entry.delete(0, tk.END)
+                self.current_entry.insert(0, str(current_mA))
 
-                # Capacity limit (mAh) – stored in max_output_power_mW field
-                # Note: The charger stores the capacity limit in the WorkState
-                # field that is parsed as max_output_power_mW in the protocol.
-                # This is the actual capacity limit value from the device.
-                capacity = work.get("max_output_power_mW", 0)
-                if capacity > 0:
-                    self.capacity_entry.delete(0, tk.END)
-                    self.capacity_entry.insert(0, str(capacity))
+            # Capacity limit (mAh) – stored in max_output_power_mW field
+            capacity = work.get("max_output_power_mW", 0)
+            if capacity > 0:
+                self.capacity_entry.delete(0, tk.END)
+                self.capacity_entry.insert(0, str(capacity))
 
-                # Cut‑off voltage (mV) – only if field is enabled
-                if self.cutoff_entry.cget('state') != 'disabled':
-                    cutoff = work.get("full_charged_volt_mV", 0)
-                    if cutoff > 0:
-                        self.cutoff_entry.delete(0, tk.END)
-                        self.cutoff_entry.insert(0, str(cutoff))
+            # Cut-off voltage (mV) – only if field is enabled
+            if self.cutoff_entry.cget('state') != 'disabled':
+                cutoff = work.get("full_charged_volt_mV", 0)
+                if cutoff > 0:
+                    self.cutoff_entry.delete(0, tk.END)
+                    self.cutoff_entry.insert(0, str(cutoff))
         except Exception as e:
             self.log_message(f"⚠️ update_settings_fields error: {e}")
 
