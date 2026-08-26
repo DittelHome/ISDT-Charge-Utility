@@ -2,20 +2,13 @@
 """
 ISDT BLE – Encapsulates all Bluetooth communication with the charger.
 
-Supports Windows and Linux equally:
-- Pre-scan before connect
-- Platform-aware settle times
-- Longer connect timeout and retries
-- Clear error hints for both platforms
-
 Author: Klaus Voigt
 """
 
 import asyncio
 import struct
-import sys
 import uuid
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient
 from bleak.backends.characteristic import BleakGATTCharacteristic
 
 from isdt_protocol import (
@@ -45,20 +38,17 @@ from isdt_models import (
 )
 
 
-# ------------------------------------------------------------------
-# Timing Constants (Windows needs slightly longer settle times)
-# ------------------------------------------------------------------
-POST_CONNECT_SETTLE = 1.5 if sys.platform == "win32" else 1.0
-POST_NOTIFICATION_SETUP = 0.8 if sys.platform == "win32" else 0.5
+POST_CONNECT_SETTLE = 1.0
+POST_NOTIFICATION_SETUP = 0.5
 COMMAND_INTERVAL = 0.1
 BIND_TIMEOUT = 3.0
 HW_INFO_TIMEOUT = 3.0
-CONNECT_TIMEOUT = 15.0
-PRE_SCAN_TIMEOUT = 8.0
 
 
 class ISDTBLE:
-    """BLE communication class for ISDT C4/A4/A8/NP2 Air chargers."""
+    """
+    BLE communication class for the ISDT C4/A4/A8/NP2 Air chargers.
+    """
 
     def __init__(self, address, log_callback=None, debug=False, config=None, device_name=None):
         self.address = address
@@ -71,9 +61,7 @@ class ISDTBLE:
         self.debug = debug
         self.hardware_info = None
         self.config = config or {}
-        self._bind_response = None
         self._device_name = device_name or ""
-        self.loop = None
 
         self.model_key = self._detect_model_from_device_name(self._device_name)
         self.model_config = get_model_config(self.model_key)
@@ -108,16 +96,7 @@ class ISDTBLE:
     def notification_handler(self, sender: BleakGATTCharacteristic, data: bytearray):
         if self.debug:
             self._log(f"📩 Notification: {data.hex()}")
-        try:
-            if self.loop and self.loop.is_running():
-                self.loop.call_soon_threadsafe(
-                    self.notification_queue.put_nowait, bytes(data)
-                )
-            else:
-                asyncio.create_task(self.notification_queue.put(bytes(data)))
-        except Exception as e:
-            if self.debug:
-                self._log(f"⚠️ Notification handler error: {e}")
+        asyncio.create_task(self.notification_queue.put(bytes(data)))
 
     async def _send_command_and_wait(self, cmd: bytes, expected_opcode: int, timeout: float = 2.0) -> bytes | None:
         if not self.connected or not self.client:
@@ -144,6 +123,7 @@ class ISDTBLE:
     async def _initialize(self):
         self._log("✅ Initializing...", force=True)
 
+        # --- Hardware info ---
         try:
             await self.client.write_gatt_char(CHAR_UUID_AF02, struct.pack("<B", CMD_HW_INFO_REQ))
             try:
@@ -162,6 +142,7 @@ class ISDTBLE:
         except Exception as e:
             self._log(f"HW-Info error: {e}", force=True)
 
+        # --- Bind handshake ---
         self._log("✅ Bind handshake...", force=True)
 
         bind_uuid_hex = self.config.get("bind_uuid", "")
@@ -175,14 +156,14 @@ class ISDTBLE:
                 self.config["bind_uuid"] = bind_uuid.hex()
                 from isdt_config import save_config
                 save_config(self.config)
-                self._log("📋 New UUID saved to config.", force=True)
+                self._log(f"📋 New UUID saved to config.", force=True)
         else:
             bind_uuid = uuid.uuid4().bytes
             self._log("📋 Generated new UUID.", force=True)
             self.config["bind_uuid"] = bind_uuid.hex()
             from isdt_config import save_config
             save_config(self.config)
-            self._log("📋 New UUID saved to config.", force=True)
+            self._log(f"📋 New UUID saved to config.", force=True)
 
         cmd = struct.pack("<B", CMD_BIND_REQ) + bind_uuid + b"\x00\x00"
         await self.client.write_gatt_char(CHAR_UUID_AF02, cmd)
@@ -195,10 +176,23 @@ class ISDTBLE:
                 resp = await asyncio.wait_for(self.notification_queue.get(), timeout=0.5)
                 if self.debug:
                     self._log(f"Intermediate response: {resp.hex()}")
-                if (len(resp) > 1 and resp[1] == CMD_BIND_RESP) or (len(resp) > 0 and resp[0] == CMD_BIND_RESP):
+                if len(resp) > 1 and resp[1] == CMD_BIND_RESP:
                     self._log("✅ Bind successful!", force=True)
                     self.bind_done = True
-                    self._bind_response = resp
+                    if not self.model_detected:
+                        model_key = detect_model_from_bind_response(resp)
+                        if model_key != self.model_key:
+                            self.model_key = model_key
+                            self.model_config = get_model_config(model_key)
+                            self.num_slots = self.model_config["slots"]
+                            self.max_current_mA = self.model_config["max_current_mA"]
+                            self.supported_battery_types = self.model_config["battery_types"]
+                            self.model_detected = True
+                            self._log(f"📱 Model detected from bind response: {self.model_key}", force=True)
+                    break
+                elif len(resp) > 0 and resp[0] == CMD_BIND_RESP:
+                    self._log("✅ Bind successful!", force=True)
+                    self.bind_done = True
                     if not self.model_detected:
                         model_key = detect_model_from_bind_response(resp)
                         if model_key != self.model_key:
@@ -223,97 +217,52 @@ class ISDTBLE:
         else:
             self._log("⚠️ Could not detect model, using default (C4 Air)", force=True)
 
+        # --- Start data stream ---
         try:
             await self.client.write_gatt_char(CHAR_UUID_AF02, struct.pack("<B", 0xE2))
             await asyncio.sleep(0.5)
         except Exception as e:
             self._log(f"⚠️ Start data stream error: {e}", force=True)
+
         await asyncio.sleep(0.5)
 
-    async def _pre_scan(self) -> bool:
-        """Confirm device is visible; refresh address (helps on Windows and Linux)."""
-        try:
-            self._log(f"📡 Pre-scan for {self.address} ...", force=True)
-            device = await BleakScanner.find_device_by_address(
-                self.address, timeout=PRE_SCAN_TIMEOUT
-            )
-            if device is None:
-                self._log(
-                    "⚠️ Device not found in scan – connect will still be attempted.",
-                    force=True
-                )
-                return False
-
-            self.address = device.address
-            if device.name and not self._device_name:
-                self._device_name = device.name
-                self.model_key = self._detect_model_from_device_name(self._device_name)
-                self.model_config = get_model_config(self.model_key)
-                self.num_slots = self.model_config["slots"]
-                self.max_current_mA = self.model_config["max_current_mA"]
-                self.supported_battery_types = self.model_config["battery_types"]
-                self.model_detected = True
-
-            self._log(f"📡 Scan OK: {device.name or '?'} ({device.address})", force=True)
-            return True
-        except Exception as e:
-            self._log(f"⚠️ Pre-scan error: {e}", force=True)
-            return False
-
-    async def connect(self, retries=3):
-        """Establish BLE connection (Windows + Linux)."""
-        self.loop = asyncio.get_running_loop()
-        await self._pre_scan()
-
+    async def connect(self, retries=2):
+        """
+        Establish BLE connection to the charger.
+        """
         attempt = 0
         while attempt <= retries:
             try:
-                self.client = BleakClient(self.address, timeout=CONNECT_TIMEOUT)
-                self._log(f"⏳ Connecting... (attempt {attempt + 1}/{retries + 1})", force=True)
+                self.client = BleakClient(self.address)
+                self._log(f"⏳ Connecting... (attempt {attempt+1}/{retries+1})", force=True)
                 await self.client.connect()
                 self.connected = True
                 self._log("✅ BLE connected.", force=True)
 
                 await asyncio.sleep(POST_CONNECT_SETTLE)
+
                 await self.client.start_notify(CHAR_UUID_AF01, self.notification_handler)
                 await self.client.start_notify(CHAR_UUID_AF02, self.notification_handler)
                 self._log("✅ Notification handlers registered.", force=True)
+
                 await asyncio.sleep(POST_NOTIFICATION_SETUP)
 
                 await self._initialize()
                 self._log("✅ Initialization complete.", force=True)
+
+                # Get initial alarm tone state
                 self._alarm_tone_state = await self.get_alarm_tone() or False
+
                 return True
 
             except Exception as e:
                 error_msg = str(e)
                 self._log(f"⚠️ Connection error: {error_msg}", force=True)
-                low = error_msg.lower()
-                if "inprogress" in low or "already" in low:
-                    self._log(
-                        "💡 Device may still be connected elsewhere – close ISD Link, "
-                        "disconnect in system Bluetooth settings, wait a few seconds.",
-                        force=True
-                    )
-                    await asyncio.sleep(3.0 if sys.platform == "win32" else 2.0)
-                elif "not found" in low or "unreachable" in low or "not available" in low:
-                    self._log(
-                        "💡 Device not reachable – power on charger, stay in range, "
-                        "ensure it is not connected to a phone.",
-                        force=True
-                    )
-                    await asyncio.sleep(2.0)
-                else:
-                    await asyncio.sleep(1.5 if sys.platform == "win32" else 1.0)
-
+                if "InProgress" in error_msg:
+                    self._log("⏳ Waiting 2s and retrying...", force=True)
+                    await asyncio.sleep(2)
                 attempt += 1
-                if self.client:
-                    try:
-                        await self.client.disconnect()
-                    except Exception:
-                        pass
-                    self.client = None
-                self.connected = False
+
         return False
 
     async def _query_workstate(self, slot: int) -> dict | None:
@@ -331,8 +280,9 @@ class ISDTBLE:
                 parsed = parse_charger_responses(resp)
                 if parsed:
                     return parsed
-                if len(resp) > 0 and resp[0] in (CMD_BIND_RESP, 0x00):
-                    continue
+                else:
+                    if len(resp) > 0 and resp[0] in (CMD_BIND_RESP, 0x00):
+                        continue
             except asyncio.TimeoutError:
                 continue
         return None
@@ -352,8 +302,9 @@ class ISDTBLE:
                 parsed = parse_charger_responses(resp)
                 if parsed:
                     return parsed
-                if len(resp) > 0 and resp[0] in (CMD_BIND_RESP, 0x00):
-                    continue
+                else:
+                    if len(resp) > 0 and resp[0] in (CMD_BIND_RESP, 0x00):
+                        continue
             except asyncio.TimeoutError:
                 continue
         return None
@@ -373,8 +324,9 @@ class ISDTBLE:
                 parsed = parse_charger_responses(resp)
                 if parsed:
                     return parsed
-                if len(resp) > 0 and resp[0] in (CMD_BIND_RESP, 0x00):
-                    continue
+                else:
+                    if len(resp) > 0 and resp[0] in (CMD_BIND_RESP, 0x00):
+                        continue
             except asyncio.TimeoutError:
                 continue
         return None
@@ -382,17 +334,21 @@ class ISDTBLE:
     async def poll_data(self) -> bool:
         if not self.connected or not self.client:
             return False
+
         received_any = False
         occupied_slots = []
 
+        # 1. WorkState for all slots
         for slot in range(1, self.num_slots + 1):
             work = await self._query_workstate(slot)
             if work:
-                self.latest_data[f"slot{slot}_workstate"] = work
+                key = f"slot{slot}_workstate"
+                self.latest_data[key] = work
                 received_any = True
                 status = work.get("status", 0)
                 if status not in (0, 5):
                     occupied_slots.append(slot)
+
                 old = self._cached_workstate.get(slot)
                 if old != work:
                     self._cached_workstate[slot] = work
@@ -406,11 +362,13 @@ class ISDTBLE:
                             self.latest_data[f"slot{slot}_ir"] = ir
                             received_any = True
             else:
+                # Fallback: direct read if notification didn't arrive
                 try:
                     direct = await self.client.read_gatt_char(CHAR_UUID_AF01)
                     parsed = parse_charger_responses(direct)
                     if parsed:
-                        self.latest_data[f"slot{slot}_workstate"] = parsed
+                        key = f"slot{slot}_workstate"
+                        self.latest_data[key] = parsed
                         received_any = True
                         status = parsed.get("status", 0)
                         if status not in (0, 5):
@@ -419,26 +377,27 @@ class ISDTBLE:
                     pass
             await asyncio.sleep(COMMAND_INTERVAL)
 
+        # 2. Electric for Slot 1 (input voltage) – always query
         elec1 = await self._query_electric(1)
         if elec1:
             self.latest_data["slot1_electric"] = elec1
             received_any = True
         await asyncio.sleep(COMMAND_INTERVAL)
 
+        # 3. Update occupied slots for adaptive pause
         self._last_occupied_slots = occupied_slots if occupied_slots else None
 
+        # 4. Timeout detection
         if received_any:
             self._poll_timeout_counter = 0
         else:
             self._poll_timeout_counter += 1
-            self._log(
-                f"⏳ No response (timeout counter: {self._poll_timeout_counter}/{self._max_timeouts})",
-                force=True
-            )
+            self._log(f"⏳ No response (timeout counter: {self._poll_timeout_counter}/{self._max_timeouts})", force=True)
             if self._poll_timeout_counter >= self._max_timeouts:
                 self._log("⚠️ Device no longer responding – disconnecting.", force=True)
                 await self.disconnect()
                 return False
+
         return True
 
     async def get_alarm_tone(self) -> bool | None:
@@ -472,12 +431,11 @@ class ISDTBLE:
         if not self.connected or not self.client:
             self._log("Not connected", force=True)
             return False
+
         if work_current_mA > self.max_current_mA:
-            self._log(
-                f"⚠️ Current {work_current_mA}mA exceeds model maximum {self.max_current_mA}mA",
-                force=True
-            )
+            self._log(f"⚠️ Current {work_current_mA}mA exceeds model maximum {self.max_current_mA}mA", force=True)
             return False
+
         cmd = bytearray()
         cmd.append(0x13)
         cmd.append(CMD_WORKTASKS_REQ)
@@ -485,10 +443,11 @@ class ISDTBLE:
         cmd.append(task_type & 0xFF)
         cmd.append(battery_type & 0xFF)
         cmd.append(linking_type & 0xFF)
-        cmd.extend(work_current_mA.to_bytes(4, "little"))
+        cmd.extend(work_current_mA.to_bytes(4, 'little'))
         cmd.append(cells & 0xFF)
-        cmd.extend(full_charged_volt.to_bytes(2, "little"))
-        cmd.extend(capacity_limit_mAh.to_bytes(4, "little"))
+        cmd.extend(full_charged_volt.to_bytes(2, 'little'))
+        cmd.extend(capacity_limit_mAh.to_bytes(4, 'little'))
+
         try:
             await self.client.write_gatt_char(CHAR_UUID_AF01, bytes(cmd))
             return True
@@ -503,10 +462,7 @@ class ISDTBLE:
                 await self.client.stop_notify(CHAR_UUID_AF02)
             except Exception:
                 pass
-            try:
-                await self.client.disconnect()
-            except Exception:
-                pass
+            await self.client.disconnect()
             self.connected = False
             self._poll_timeout_counter = 0
             self._last_occupied_slots = None
