@@ -255,13 +255,19 @@ class ISDTBLE:
 
                 return True
 
+
+            
             except Exception as e:
                 error_msg = str(e)
+                if error_msg == "":
+                    error_msg = "Unknown BLE error (empty error message)"
                 self._log(f"⚠️ Connection error: {error_msg}", force=True)
-                if "InProgress" in error_msg:
+                if "InProgress" in error_msg or "already" in error_msg.lower():
                     self._log("⏳ Waiting 2s and retrying...", force=True)
                     await asyncio.sleep(2)
-                attempt += 1
+            attempt += 1
+            
+            
 
         return False
 
