@@ -105,6 +105,10 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 
 ## 🔧 Installation & Usage
 
+> **⚠️ Important:** The ISDT charger must **NOT** be paired via Bluetooth settings!
+> Do **NOT** use "Add Bluetooth device" inside Windows/Linux to pair the charger.
+> The app handles the BLE connection directly.
+
 ### 🪟 Windows (EXE – Recommended for end users)
 
 > **No Python installation required!** Just download and run.
@@ -114,10 +118,6 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 
 
 **Done!** 🎉
-
-> **⚠️ Important:** On Windows, the ISDT charger must **NOT** be paired via Windows Bluetooth settings!
-> Do **NOT** use "Add Bluetooth device" in Windows to pair the charger.
-> The app handles the BLE connection directly.
 
 ---
 
@@ -159,7 +159,7 @@ python3 isdt.py
 
 ## 🚀 Usage
 
-### First Start (Windows EXE / Python)
+### Start App (Windows EXE / Python)
 
 1. **Start the app** – Double-click the `ISDT-Charge-Utility.exe` or run `python isdt.py`
 2. **Scan and save your device** – Settings tab → Scan → Select → Save
@@ -205,6 +205,17 @@ python3 isdt.py
 | **Charge Time** | Elapsed charging time (from device) |
 | **Charge Level** | Battery bar with percentage |
 
+
+## 📊 Setting Data
+
+| Column | Description |
+|--------|-------------|
+| **Slot** | Channel number (1-8 depending on model) |
+| **Battery type** | Battery chemistry (NiMh/NiCd, LiIon, LiFe, etc.) |
+| **Current** | Maximum load capacity (protection mechanism) |
+| **Capacity Limit** | Capacity Limit (protection mechanism) |
+| **Cut off** | Only for NiMh/NiCd **delta values**, for the rest absolute values|
+
 ---
 
 ## 📁 Project Structure
@@ -243,22 +254,12 @@ Settings are stored in:
 
 ### "Device with address ... was not found"
 
-#### Windows (EXE)
-- **DO NOT pair** the device via Windows Bluetooth settings
+- **DO NOT pair** the device via Windows/Linux Bluetooth settings
 - Close the ISD Link app on your smartphone
 
-#### Windows (Python) / Linux
-- **Linux:** Pair the device in Blueman (PIN: `000000`)
-- **Windows:** Same as above (DO NOT pair via Windows settings!)
-
 ### Connection Timeout
-- Make sure the charger is within 1-2 meters of your PC
+- Make sure the charger is near enough of your PC
 - **Close the ISD Link app** on your smartphone or on a second PC (IMPORTANT!)
-
-### Wrong Model Detected
-- The model is detected from the BLE device name (e.g., "0000C4Air S00")
-- Make sure you have the correct device saved in Settings
-- Try re-scanning and saving the device
 
 ### "Device is rebooting sometimes"
 - Make sure you have a good USB‑C power adapter. (No multiport USB Chargers)  
