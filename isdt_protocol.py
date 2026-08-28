@@ -94,7 +94,7 @@ def parse_workstate(data: bytes) -> dict | None:
         "battery_type": data[17],
         "battery_type_str": BATTERY_TYPE_MAP.get(data[17], "unknown"),
         "full_charged_volt_mV": int.from_bytes(data[20:22], "little"),
-        "work_current_mA": int.from_bytes(data[22:26], "little"),
+        "max_current_mA": int.from_bytes(data[22:26], "little"),  # Umbenannt von work_current_mA
         # Charger stores capacity limit in this field (protocol quirk)
         "max_output_power_mW": int.from_bytes(data[32:36], "little"),
     }

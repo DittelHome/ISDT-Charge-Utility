@@ -9,7 +9,7 @@ This file contains all model-specific settings including:
 - Display names
 - Device name patterns for auto-detection
 - Battery type mappings
-- Battery-specific validation limits
+- Battery-specific validation limits (including default cut-off values)
 - Global current limits
 
 Author: Klaus Voigt
@@ -37,8 +37,8 @@ ISDT_MODELS = {
         "battery_types": ["LiHV", "LiIon", "LiFe", "NiZn", "NiMh/NiCd", "LiIon(1.5V)", "Auto"],
         "display_name": "C4 Air",
         "supports_alarm": True,
-        "default_current_mA": 1000,
-        "default_capacity_mAh": 2000,
+        "default_current_mA": 300,
+        "default_capacity_mAh": 2500,
         "name_patterns": ["C4Air", "C4 Air", "0000C4Air"],
     },
     "A4 Air": {
@@ -47,8 +47,8 @@ ISDT_MODELS = {
         "battery_types": ["NiMh/NiCd", "LiIon", "LiFe", "Auto"],
         "display_name": "A4 Air",
         "supports_alarm": True,
-        "default_current_mA": 500,
-        "default_capacity_mAh": 2000,
+        "default_current_mA": 300,
+        "default_capacity_mAh": 2500,
         "name_patterns": ["A4Air", "A4 Air", "0000A4Air"],
     },
     "A8 Air": {
@@ -57,8 +57,8 @@ ISDT_MODELS = {
         "battery_types": ["LiHV", "NiMh/NiCd", "LiIon", "LiFe", "Auto"],
         "display_name": "A8 Air",
         "supports_alarm": True,
-        "default_current_mA": 500,
-        "default_capacity_mAh": 2000,
+        "default_current_mA": 300,
+        "default_capacity_mAh": 2500,
         "name_patterns": ["A8Air", "A8 Air", "0000A8Air"],
     },
     "NP2 Air": {
@@ -67,8 +67,8 @@ ISDT_MODELS = {
         "battery_types": ["LiIon", "Auto"],
         "display_name": "NP2 Air",
         "supports_alarm": True,
-        "default_current_mA": 1000,
-        "default_capacity_mAh": 2000,
+        "default_current_mA": 300,
+        "default_capacity_mAh": 5000,
         "name_patterns": ["NP2Air", "NP2 Air", "0000NP2Air"],
     },
 }
@@ -94,12 +94,13 @@ BATTERY_TYPE_STR_TO_INT = {
 BATTERY_TYPE_INT_TO_STR = {v: k for k, v in BATTERY_TYPE_STR_TO_INT.items()}
 
 # ------------------------------------------------------------------
-# Battery-Specific Limits (Validation)
+# Battery-Specific Limits (Validation + Defaults)
 # ------------------------------------------------------------------
-# Each battery type has validation limits for:
+# Each battery type has validation limits and defaults for:
 # - capacity_min / capacity_max: Allowed capacity range in mAh (0 = unlimited)
 # - cutoff_min / cutoff_max: Allowed cut-off voltage range in mV (0 = disabled)
 # - cutoff_enabled: Whether the cut-off setting is available for this type
+# - cutoff_default: Default cut-off value in mV (used when battery type is selected)
 # ------------------------------------------------------------------
 BATTERY_LIMITS = {
     "LiHV": {
@@ -108,6 +109,7 @@ BATTERY_LIMITS = {
         "cutoff_min": 4250,
         "cutoff_max": 4450,
         "cutoff_enabled": True,
+        "cutoff_default": 4350,
     },
     "LiIon": {
         "capacity_min": 2000,
@@ -115,6 +117,7 @@ BATTERY_LIMITS = {
         "cutoff_min": 4100,
         "cutoff_max": 4300,
         "cutoff_enabled": True,
+        "cutoff_default": 4200,
     },
     "LiFe": {
         "capacity_min": 2000,
@@ -122,6 +125,7 @@ BATTERY_LIMITS = {
         "cutoff_min": 3550,
         "cutoff_max": 3750,
         "cutoff_enabled": True,
+        "cutoff_default": 3650,
     },
     "NiZn": {
         "capacity_min": 2000,
@@ -129,6 +133,7 @@ BATTERY_LIMITS = {
         "cutoff_min": 1800,
         "cutoff_max": 2000,
         "cutoff_enabled": True,
+        "cutoff_default": 1900,
     },
     "NiMh/NiCd": {
         "capacity_min": 1000,
@@ -136,6 +141,7 @@ BATTERY_LIMITS = {
         "cutoff_min": 3,
         "cutoff_max": 12,
         "cutoff_enabled": True,
+        "cutoff_default": 4,
     },
     "LiIon(1.5V)": {
         "capacity_min": 1000,
@@ -143,6 +149,7 @@ BATTERY_LIMITS = {
         "cutoff_min": 0,
         "cutoff_max": 0,
         "cutoff_enabled": False,
+        "cutoff_default": 0,
     },
     "Auto": {
         "capacity_min": 0,
@@ -150,6 +157,7 @@ BATTERY_LIMITS = {
         "cutoff_min": 0,
         "cutoff_max": 0,
         "cutoff_enabled": False,
+        "cutoff_default": 0,
     },
 }
 
@@ -158,7 +166,7 @@ BATTERY_LIMITS = {
 # ------------------------------------------------------------------
 # These apply to all battery types and models
 CURRENT_MIN_MA = 100   # Minimum charging current (0.1A)
-CURRENT_MAX_MA = 2000  # Maximum charging current (2.0A) - highest across all models
+CURRENT_MAX_MA = 2500  # Maximum charging current (2.0A) - highest across all models
 
 # ------------------------------------------------------------------
 # Helper Functions
@@ -175,6 +183,36 @@ def get_model_config(model_key: str) -> Dict[str, Any]:
         Dictionary with model configuration, or C4 Air config as fallback
     """
     return ISDT_MODELS.get(model_key, ISDT_MODELS["C4 Air"])
+
+
+def get_default_cutoff(battery_type: str) -> int:
+    """
+    Get the default cut-off value for a battery type.
+    
+    Args:
+        battery_type: The battery type string (e.g., "LiHV", "NiMh/NiCd")
+        
+    Returns:
+        Default cut-off value in mV, or 0 if not supported
+    """
+    limits = BATTERY_LIMITS.get(battery_type)
+    if limits:
+        return limits.get("cutoff_default", 0)
+    return 0
+
+
+def get_default_current(model_key: str) -> int:
+    """
+    Get the default charging current for a model.
+    
+    Args:
+        model_key: The model identifier (e.g., "C4 Air")
+        
+    Returns:
+        Default current in mA (300 for all models)
+    """
+    config = get_model_config(model_key)
+    return config.get("default_current_mA", 300)
 
 
 def detect_model_from_device_name(device_name: str) -> str:
