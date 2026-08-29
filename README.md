@@ -114,9 +114,10 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 
 > **No Python installation required!** Just download and run.
 
-1. Download the latest `ISDT-Charge-Utility.exe` 
-2. Double-click the `ISDT-Charge-Utility.exe` to start the application
+[**Download the latest ISDT Charge Utility release**](../../releases/latest)
 
+1. Download `ISDT-Charge-Utility.exe`
+2. Double-click `ISDT-Charge-Utility.exe` to start the application
 
 **Done!** 🎉
 
