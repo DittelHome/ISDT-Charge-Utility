@@ -2,12 +2,14 @@
 ``` 
 # ISDT Charge Utility
 
-**Cross-platform GUI for ISDT C4/A4/A8/NP2 Air chargers**
+**Cross-platform GUI for ISDT C4 Air, A4 Air, A8 Air and NP2 Air battery chargers on Windows and Linux**
+
+Monitor and control your ISDT charger via Bluetooth Low Energy (BLE), including charging status, battery type, charge current, capacity limit and cut-off voltage
+
 - Direct Bluetooth Low Energy (BLE) connection.  
 - Works under Windows and Linux.
-- **Automatic model detection** – C4 Air (6 slots), A4 Air (4 slots), A8 Air (8 slots), NP2 (2 slots)
+- **Automatic model detection** – Supports C4 Air (6 slots), A4 Air (4 slots), A8 Air (8 slots) and NP2 Air (2 slots)
 
-Monitor and control your charger with ease.
 
 ![Python Version](https://img.shields.io/badge/python-3.13+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
@@ -40,7 +42,6 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 |-----------|----------|
 | ![Main View](images/screenshot_main.png) | ![Settings](images/screenshot_settings.png) |
 
-*(Replace with actual screenshots)*
 
 ---
 
@@ -54,7 +55,7 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 - **Detailed Status** – Pre‑charge, CC, CV, done, error
 - **Charge Time** – Read directly from the device
 - **Battery Bar** – Visual representation of charge level
-- **Input Voltage & Total Power** – Total Power = Power consupmtion of the device
+- **Input Voltage & Total Power** – Total Power = Power consumption of the device
 - **Hardware Info** – Firmware and hardware version displayed on connect
 - **Automatic Polling** – Regular data updates (interval adjustable)
 - **Timeout Detection** – Detects when the device is powered off
