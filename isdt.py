@@ -4,7 +4,7 @@
 """
 ISDT Charger – Monitor & Control
 
-This is the main GUI application for ISDT C4/A4/A8 Air chargers.
+This is the main GUI application for ISDT C4/A4/A8/NP2 Air chargers.
 It provides real-time monitoring of all charging slots and full control
 over charging parameters (battery type, current, capacity limit, cut‑off).
 
@@ -15,10 +15,10 @@ Key features:
 - Live data display (voltage, current, capacity, IR, charge time, status)
 - Parameter control with battery‑specific validation
 - Alarm tone toggle
-- Persistent configuration (MAC, device name, poll interval, bind UUID)
+- Persistent configuration (MAC, model selection, poll interval, bind UUID)
 - Adaptive polling (longer intervals when idle)
 - GUI caching (only redraws when data changes)
-- Automatic model detection
+- Manual model selection (user chooses model in settings)
 
 Dependencies:
 - bleak (BLE library)
@@ -50,7 +50,6 @@ if sys.platform == "win32":
 
 from isdt_ble import ISDTBLE
 from isdt_config import load_config, save_config
-from isdt_protocol import WORK_STATE_MAP
 from isdt_models import (
     get_model_config,
     get_default_current,
@@ -96,7 +95,7 @@ class ISDTGui:
         # Widget references for dynamic updates
         self.slot_combo = None
         self.battery_combo = None
-        self.cutoff_label = None       # Referenz für das Cut-off Label
+        self.cutoff_label = None       # Reference for cut-off label
 
         # Configure ttk styles
         style = ttk.Style()
@@ -149,7 +148,7 @@ class ISDTGui:
         - Control buttons (Connect, Disconnect, Alarm toggle)
         - Model info label
         - Data table with all values
-        - Slot Settings panel (eine Zeile)
+        - Slot Settings panel (one row)
         - Log window for status messages
         """
         # ------------------------------------------------------------------
@@ -214,7 +213,7 @@ class ISDTGui:
             "Charge Level": 180,
         }
         
-        # Font für Spaltenüberschriften (kleiner)
+        # Smaller font for column headings
         style = ttk.Style()
         style.configure("Treeview.Heading", font=('Helvetica', 8, 'bold'))
         
@@ -227,7 +226,7 @@ class ISDTGui:
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
 
         # ------------------------------------------------------------------
-        # Slot Settings panel - eine Zeile
+        # Slot Settings panel - one row
         # ------------------------------------------------------------------
         settings_frame = ttk.LabelFrame(self.tab_device, text="🔧 Slot Settings")
         settings_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -263,7 +262,7 @@ class ISDTGui:
         self.capacity_entry.insert(0, "no limit")
         self._create_tooltip(self.capacity_entry, "Enter limit in mAh, or use 0 or 'no limit' for unlimited\nDefault depends on battery type")
 
-        # Cut-off (mV) - Label mit Referenz für dynamische Änderung
+        # Cut-off (mV) - Label with reference for dynamic updates
         self.cutoff_label = ttk.Label(settings_frame, text="Cut-off (mV):")
         self.cutoff_label.grid(row=0, column=8, padx=5)
         self.cutoff_entry = ttk.Entry(settings_frame, width=6)
@@ -332,9 +331,9 @@ class ISDTGui:
         - Save button to store selected device
 
         Right column: Settings
-        - MAC address (read‑only, shown for reference)
-        - Device name
-        - Poll interval (seconds)
+        - MAC address
+        - Model selection (dropdown)
+        - Poll interval (minimum 3 seconds)
         """
         main_frame = ttk.Frame(self.tab_settings, padding=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -371,15 +370,20 @@ class ISDTGui:
         self.settings_mac.pack(anchor=tk.W, pady=2)
         self.settings_mac.insert(0, self.config.get("mac_address", ""))
 
-        ttk.Label(right_frame, text="Device name:").pack(anchor=tk.W, pady=(10, 0))
-        self.settings_name = ttk.Entry(right_frame, width=30)
-        self.settings_name.pack(anchor=tk.W, pady=2)
-        self.settings_name.insert(0, self.config.get("device_name", ""))
+        ttk.Label(right_frame, text="Model:").pack(anchor=tk.W, pady=(10, 0))
+        self.settings_model = ttk.Combobox(
+            right_frame,
+            values=["C4 Air", "A4 Air", "A8 Air", "NP2 Air"],
+            width=25,
+            state="readonly"
+        )
+        self.settings_model.pack(anchor=tk.W, pady=2)
+        self.settings_model.set(self.config.get("selected_model", "C4 Air"))
 
         ttk.Label(right_frame, text="Poll interval (s):").pack(anchor=tk.W, pady=(10, 0))
         self.settings_interval = ttk.Entry(right_frame, width=10)
         self.settings_interval.pack(anchor=tk.W, pady=2)
-        self.settings_interval.insert(0, str(self.config.get("poll_interval", 5)))
+        self.settings_interval.insert(0, str(self.config.get("poll_interval", 3)))
 
         save_settings_btn = ttk.Button(right_frame, text="Save settings", command=self.save_settings)
         save_settings_btn.pack(anchor=tk.W, pady=20)
@@ -387,11 +391,6 @@ class ISDTGui:
     # ------------------------------------------------------------------
     # Model-specific GUI Updates
     # ------------------------------------------------------------------
-
-
-
-
-
 
     def update_gui_for_model(self):
         """
@@ -410,10 +409,9 @@ class ISDTGui:
         model_key = self.device.model_key
         model_config = self.device.model_config
 
-        # Debug information about model detection
-        self.log_message(f"Detected model: {model_config['display_name']} (Key: {model_key})")
-        self.log_message(f"Device name from config: {self.config.get('device_name', 'unknown')}")
-        self.log_message(f"Slots: {model_config['slots']}, Max current: {model_config['max_current_mA']}mA")
+        # Debug information for model detection
+        self.log_message(f"🔍 Model: {model_config['display_name']} (Key: {model_key})")
+        self.log_message(f"🔍 Slots: {model_config['slots']}, Max current: {model_config['max_current_mA']}mA")
 
         # Update window title
         self.root.title(f"ISDT {model_config['display_name']} – Monitor & Control")
@@ -438,14 +436,10 @@ class ISDTGui:
 
         # Log model details
         max_current = model_config["max_current_mA"]
-        self.log_message(f"Model: {model_config['display_name']} ({num_slots} slots, max {max_current}mA)")
+        self.log_message(f"📊 Model: {model_config['display_name']} ({num_slots} slots, max {max_current}mA)")
 
         # Reset GUI cache for correct display
         self._last_table_values = []
-
-
-
-
 
     # ------------------------------------------------------------------
     # Logging & Status Updates
@@ -505,19 +499,19 @@ class ISDTGui:
 
     def _on_battery_type_changed(self, event=None):
         """
-        Wird aufgerufen, wenn der Battery Type geändert wird.
-        - Bei "Auto" werden alle Eingabefelder ausgegraut
-        - Bei anderen Typen werden die Default-Werte gesetzt
+        Called when battery type is changed.
+        - "Auto" → disable all input fields
+        - Other types → set default values
         """
         batt_str = self.battery_type_var.get()
         is_auto = (batt_str == "Auto")
         
-        # Felder je nach Auto-Modus aktivieren/deaktivieren
+        # Enable/disable fields based on Auto mode
         if is_auto:
             self.current_entry.config(state='disabled', style="Gray.TEntry")
             self.capacity_entry.config(state='disabled', style="Gray.TEntry")
             self.cutoff_entry.config(state='disabled', style="Gray.TEntry")
-            # Werte auf "Auto" setzen
+            # Set values to "Auto"
             self.current_entry.delete(0, tk.END)
             self.current_entry.insert(0, "Auto")
             self.capacity_entry.delete(0, tk.END)
@@ -529,22 +523,22 @@ class ISDTGui:
             self.capacity_entry.config(state='normal', style="TEntry")
             self.cutoff_entry.config(state='normal', style="TEntry")
             
-            # Default-Werte für den ausgewählten Batterietyp setzen
+            # Set default values for the selected battery type
             limits = BATTERY_LIMITS.get(batt_str)
             if limits:
-                # Current: Default aus Modell
+                # Current: Default from model
                 if self.device and self.device.model_key:
                     default_current = get_default_current(self.device.model_key)
                     self.current_entry.delete(0, tk.END)
                     self.current_entry.insert(0, str(default_current))
                 
-                # Cap Limit: Default aus Modell
+                # Cap Limit: Default from model
                 if self.device:
                     default_capacity = self.device.model_config.get("default_capacity_mAh", 2000)
                     self.capacity_entry.delete(0, tk.END)
                     self.capacity_entry.insert(0, str(default_capacity))
                 
-                # Cut-off: Default aus BATTERY_LIMITS
+                # Cut-off: Default from BATTERY_LIMITS
                 default_cutoff = limits.get("cutoff_default", 0)
                 if default_cutoff > 0:
                     self.cutoff_entry.delete(0, tk.END)
@@ -561,8 +555,8 @@ class ISDTGui:
 
     def _update_cutoff_delta_label(self, event=None):
         """
-        Aktualisiert den Label-Text für Cut-off basierend auf dem aktuellen Wert.
-        Wenn der Wert zwischen 1 und 5 mV liegt, zeige (ΔmV), sonst (mV).
+        Updates the cut-off label text based on current value.
+        If value is between 1 and 5 mV, show (ΔmV), otherwise (mV).
         """
         if not hasattr(self, "cutoff_label"):
             return
@@ -587,30 +581,22 @@ class ISDTGui:
     # ------------------------------------------------------------------
 
     def auto_connect(self):
-        """
-        Automatic connection on startup.
-
-        Called by __init__ after a 500ms delay. Uses the saved MAC address.
-        """
+        """Automatic connection on startup."""
         mac = self.config.get("mac_address")
-        device_name = self.config.get("device_name", "")
         if mac:
             self.log_message(f"⏳ Auto-connecting to {mac} ...")
-            self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False,
-                                  config=self.config, device_name=device_name)
+            self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False, config=self.config)
             asyncio.run_coroutine_threadsafe(self._connect_async(), self.loop)
 
     def connect_saved(self):
         """Manual connection using the saved MAC address (button click)."""
         mac = self.config.get("mac_address")
-        device_name = self.config.get("device_name", "")
         if not mac:
             messagebox.showerror("Error", "No MAC address saved.")
             return
         self.log_message(f"⏳ Connecting to saved address {mac} ...")
         self._kill_blueman_connection(mac)
-        self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False,
-                              config=self.config, device_name=device_name)
+        self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False, config=self.config)
         asyncio.run_coroutine_threadsafe(self._connect_async(), self.loop)
 
     async def _connect_async(self):
@@ -625,7 +611,7 @@ class ISDTGui:
             if success:
                 self.root.after(0, lambda: self.log_message("✅ Connected!"))
                 self.root.after(0, lambda: self.update_status(
-                    f"Connected to {self.config.get('device_name', self.device.address)}", "green"
+                    f"Connected to {self.config.get('selected_model', 'ISDT')}", "green"
                 ))
                 self.root.after(0, lambda: self.connect_btn.config(state=tk.DISABLED))
                 self.root.after(0, lambda: self.disconnect_btn.config(state=tk.NORMAL))
@@ -649,9 +635,14 @@ class ISDTGui:
         Stops polling, disconnects BLE, clears the table, and resets buttons.
         """
         if self.device:
-            self.device.connected = False
+            # Stop polling first
             self.polling = False
-            asyncio.run_coroutine_threadsafe(self.device.disconnect(), self.loop)
+            # Schedule disconnect and wait for it to complete
+            future = asyncio.run_coroutine_threadsafe(self.device.disconnect(), self.loop)
+            try:
+                future.result(timeout=3.0)  # Wait up to 3 seconds
+            except Exception as e:
+                self.log_message(f"⚠️ Disconnect timeout: {e}")
             self.device = None
 
         self.connect_btn.config(state=tk.NORMAL)
@@ -676,7 +667,7 @@ class ISDTGui:
         if self.polling:
             return
         self.polling = True
-        interval = self.config.get("poll_interval", 5)
+        interval = self.config.get("poll_interval", 3)
         idle_interval = 10
         self.log_message(f"✅ Polling started (interval: {interval}s, idle: {idle_interval}s).....")
         asyncio.run_coroutine_threadsafe(self._poll_loop(interval, idle_interval), self.loop)
@@ -791,7 +782,7 @@ class ISDTGui:
             elec = self.device.latest_data.get(f"slot{slot}_electric", {})
             ir = self.device.latest_data.get(f"slot{slot}_ir", {})
 
-            # Wenn keine WorkState existiert → leeren Slot mit 0
+            # If no WorkState exists → empty slot with zeros
             if not work:
                 row = (slot, "idle", "Auto", "0.000", "0.00",
                        0, 0, 0, "--:--", "0", "no limit", "—")
@@ -801,7 +792,7 @@ class ISDTGui:
             status = work.get("status_str", "idle")
             is_idle = status in ("idle", "empty") or work.get("status", 0) == 0
 
-            # Batterietyp aus WorkState
+            # Battery type from WorkState
             batt_type = work.get("battery_type", -1)
             if batt_type >= 0:
                 inv_map = {v: k for k, v in BATTERY_TYPE_STR_TO_INT.items()}
@@ -811,15 +802,15 @@ class ISDTGui:
             
             battery_type = work.get("battery_type_str", "Auto")
 
-            # --- Max Current - immer aus WorkState ---
+            # --- Max Current - always from WorkState ---
             max_current = work.get("max_current_mA", 0)
             max_current_display = str(max_current) if max_current > 0 else "0"
 
-            # --- Cap Limit - immer aus WorkState, 0 → "no limit" ---
+            # --- Cap Limit - always from WorkState, 0 → "no limit" ---
             cap_limit = work.get("max_output_power_mW", 0)
             cap_limit_display = str(cap_limit) if cap_limit > 0 else "no limit"
 
-            # --- Cut-off - immer aus WorkState (auch bei Auto!) ---
+            # --- Cut-off - always from WorkState (even in Auto!) ---
             cutoff_mV = work.get("full_charged_volt_mV", 0)
             if cutoff_mV > 0:
                 if cutoff_mV < 6:
@@ -830,7 +821,7 @@ class ISDTGui:
                 cutoff_display = "0"
 
             if is_idle:
-                # Idle Slot → keine weiteren Daten
+                # Idle slot → no further data
                 voltage_V = 0.0
                 current_A = 0.0
                 capacity = 0
@@ -842,7 +833,7 @@ class ISDTGui:
                 if slot in self.charge_start_times:
                     del self.charge_start_times[slot]
             else:
-                # --- Aktiver Slot ---
+                # --- Active slot ---
                 
                 # --- Voltage ---
                 voltage_mV = elec.get("voltage_mV", 0)
@@ -850,7 +841,7 @@ class ISDTGui:
                     voltage_mV = work.get("voltage_mV", 0)
                 voltage_V = voltage_mV / 1000.0
 
-                # --- Current (aktueller Ladestrom) - bei "done" auf 0 setzen ---
+                # --- Current (actual charging current) - set to 0 when "done" ---
                 if status == "done":
                     current_A = 0.0
                 else:
@@ -861,7 +852,8 @@ class ISDTGui:
 
                 # --- Capacity ---
                 capacity_percent = work.get("capacity_percent", 0)
-                capacity = elec.get("capacity_mAh", work.get("capacity_mAh", 0))
+                # Capacity is only available in WorkState, not Electric response
+                capacity = work.get("capacity_mAh", 0)
 
                 # --- Internal resistance ---
                 ir_val = ir.get("ir_total_mohm", work.get("ir_mohm", 0))
@@ -897,7 +889,7 @@ class ISDTGui:
 
                 battery_display = self._battery_bar(capacity_percent)
 
-            # Neue Spaltenreihenfolge
+            # New column order
             row = (slot, status, battery_type, f"{voltage_V:.3f}", f"{current_A:.2f}",
                    max_current_display, capacity, ir_val, charge_time_str,
                    cutoff_display, cap_limit_display, battery_display)
@@ -937,7 +929,7 @@ class ISDTGui:
     def update_settings_fields(self):
         """
         Loads charging settings for the selected slot.
-        Zeigt immer die Default-Werte an (die tatsächlichen Werte stehen in der Tabelle).
+        Always shows default values (actual values are in the table).
         """
         if not self.device or not self.device.connected:
             return
@@ -946,7 +938,7 @@ class ISDTGui:
             slot = int(self.slot_var.get()) - 1
             work = self.device.latest_data.get(f"slot{slot + 1}_workstate", {})
             
-            # Batterietyp aus WorkState lesen oder Default
+            # Read battery type from WorkState or use default
             batt_type = work.get("battery_type", -1) if work else -1
             if batt_type >= 0:
                 inv_map = {v: k for k, v in BATTERY_TYPE_STR_TO_INT.items()}
@@ -954,32 +946,32 @@ class ISDTGui:
             else:
                 batt_str = "Auto"
             
-            # Battery Type setzen
+            # Set battery type
             if batt_str in self.device.supported_battery_types:
                 self.battery_type_var.set(batt_str)
             else:
                 self.battery_type_var.set("Auto")
             
-            # Felder je nach Auto-Modus konfigurieren
+            # Configure fields based on Auto mode
             self._on_battery_type_changed()
             
-            # Wenn nicht Auto, die Default-Werte setzen (überschreibt die aus _on_battery_type_changed)
+            # If not Auto, set default values (overrides _on_battery_type_changed)
             if batt_str != "Auto":
                 limits = BATTERY_LIMITS.get(batt_str)
                 if limits:
-                    # Current: Default aus Modell
+                    # Current: Default from model
                     if self.device and self.device.model_key:
                         default_current = get_default_current(self.device.model_key)
                         self.current_entry.delete(0, tk.END)
                         self.current_entry.insert(0, str(default_current))
                     
-                    # Cap Limit: Default aus Modell
+                    # Cap Limit: Default from model
                     if self.device:
                         default_capacity = self.device.model_config.get("default_capacity_mAh", 2000)
                         self.capacity_entry.delete(0, tk.END)
                         self.capacity_entry.insert(0, str(default_capacity))
                     
-                    # Cut-off: Default aus BATTERY_LIMITS
+                    # Cut-off: Default from BATTERY_LIMITS
                     default_cutoff = limits.get("cutoff_default", 0)
                     if default_cutoff > 0:
                         self.cutoff_entry.delete(0, tk.END)
@@ -988,7 +980,7 @@ class ISDTGui:
                         self.cutoff_entry.delete(0, tk.END)
                         self.cutoff_entry.insert(0, "0")
 
-            # --- Cut-off Label mit Delta-V Unterstützung ---
+            # --- Cut-off Label with delta-V support ---
             if hasattr(self, "cutoff_label") and work:
                 cutoff_actual = work.get("full_charged_volt_mV", 0)
                 if cutoff_actual > 0 and cutoff_actual < 6:
@@ -1069,13 +1061,11 @@ class ISDTGui:
         device = self.scanned_devices[idx]
 
         self.config["mac_address"] = device.address
-        self.config["device_name"] = device.name or ""
+        # Keep existing model selection and poll interval
         save_config(self.config)
 
         self.settings_mac.delete(0, tk.END)
         self.settings_mac.insert(0, device.address)
-        self.settings_name.delete(0, tk.END)
-        self.settings_name.insert(0, device.name or "")
 
         self.log_message(f"✅ Saved: {device.name} ({device.address})")
         messagebox.showinfo("Success", f"Device saved:\n{device.name}\n{device.address}")
@@ -1086,17 +1076,21 @@ class ISDTGui:
 
     def save_settings(self):
         mac = self.settings_mac.get().strip()
-        name = self.settings_name.get().strip()
+        selected_model = self.settings_model.get().strip()
         try:
             interval = int(self.settings_interval.get().strip())
-            if interval < 1:
+            if interval < 3:
                 raise ValueError
         except ValueError:
-            messagebox.showerror("Error", "Please enter a valid number for the interval (≥ 1).")
+            messagebox.showerror("Error", "Please enter a valid number for the interval (≥ 3 seconds).")
+            return
+
+        if not mac:
+            messagebox.showerror("Error", "MAC address cannot be empty.")
             return
 
         self.config["mac_address"] = mac
-        self.config["device_name"] = name
+        self.config["selected_model"] = selected_model
         self.config["poll_interval"] = interval
         save_config(self.config)
 

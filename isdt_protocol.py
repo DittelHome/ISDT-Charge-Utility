@@ -94,18 +94,26 @@ def parse_workstate(data: bytes) -> dict | None:
         "battery_type": data[17],
         "battery_type_str": BATTERY_TYPE_MAP.get(data[17], "unknown"),
         "full_charged_volt_mV": int.from_bytes(data[20:22], "little"),
-        "max_current_mA": int.from_bytes(data[22:26], "little"),  # Umbenannt von work_current_mA
+        "max_current_mA": int.from_bytes(data[22:26], "little"),
         # Charger stores capacity limit in this field (protocol quirk)
         "max_output_power_mW": int.from_bytes(data[32:36], "little"),
     }
 
 
 def parse_electric(data: bytes) -> dict | None:
-    """Parse ElectricResp (0xE5)."""
+    """
+    Parse ElectricResp (0xE5).
+    
+    For all ISDT Air chargers (C4, A4, A8, NP2), each slot holds a single cell.
+    The response contains voltage readings for all slots in the 'cells' list.
+    The voltage for a specific slot is cells[channel] where channel is 0-based.
+    """
     if len(data) < 12 or data[1] != RESP_ELECTRIC:
         return None
+
     channel = data[2]
     is_long = len(data) > 35
+
     if is_long:
         input_voltage_mV = int.from_bytes(data[3:7], "little")
         input_current_mA = int.from_bytes(data[7:11], "little")
@@ -132,6 +140,7 @@ def parse_electric(data: bytes) -> dict | None:
                 break
             cells.append(cell_mV)
             offset += 2
+
     result = {
         "channel": channel,
         "input_voltage_mV": input_voltage_mV,
@@ -139,31 +148,58 @@ def parse_electric(data: bytes) -> dict | None:
         "output_voltage_mV": output_voltage_mV,
         "charging_current_mA": charging_current_mA,
     }
+
     if cells:
         result["cells_mV"] = cells
-        result["voltage_mV"] = sum(cells)
+        # The 'cells' list contains voltages for ALL slots.
+        # The voltage for THIS slot is cells[channel] (channel is 0-based).
+        if channel < len(cells):
+            result["voltage_mV"] = cells[channel]
+        else:
+            # Fallback: use first cell if channel index is out of range
+            result["voltage_mV"] = cells[0] if cells else output_voltage_mV
     else:
         result["voltage_mV"] = output_voltage_mV
+
     return result
 
 
 def parse_ir(data: bytes) -> dict | None:
-    """Parse IRResp (0xFB)."""
+    """
+    Parse IRResp (0xFB).
+    
+    For A4, A8 and NP2 Air, the response contains IR values for ALL slots.
+    The IR value for a specific slot is ir_values[channel] where channel is 0-based.
+    For C4 Air, the response contains only one value (the requested slot),
+    so ir_values[0] is the correct value.
+    """
     if len(data) < 4 or data[1] != RESP_IR:
         return None
+
     channel = data[2]
     ir_values = []
     offset = 3
+
+    # Extract all IR values from the response
     while offset + 1 < len(data):
         raw = int.from_bytes(data[offset:offset + 2], "little")
         if raw == 0 or raw >= 10000:
             break
         ir_values.append(raw / 10.0)
         offset += 2
+
+    # The 'ir_values' list contains IR values for ALL slots.
+    # The IR value for THIS slot is ir_values[channel] (channel is 0-based).
+    if channel < len(ir_values):
+        ir_total = ir_values[channel]
+    else:
+        # Fallback: use first value if channel index is out of range
+        ir_total = ir_values[0] if ir_values else 0
+
     return {
         "channel": channel,
         "ir_values_mohm": ir_values,
-        "ir_total_mohm": sum(ir_values) if ir_values else 0,
+        "ir_total_mohm": ir_total,
     }
 
 

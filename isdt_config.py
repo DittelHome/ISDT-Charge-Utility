@@ -11,9 +11,9 @@ CONFIG_FILE = os.path.expanduser("~/.isdt_gui_config.json")
 
 DEFAULT_CONFIG = {
     "mac_address": "",
-    "device_name": "",
-    "poll_interval": 5,
     "bind_uuid": "",          # Persistent Bind UUID (Hex string) – generated once and reused
+    "selected_model": "C4 Air",  # Manually selected model: C4 Air, A4 Air, A8 Air, NP2 Air
+    "poll_interval": 3,       # Polling interval in seconds (minimum 3)
 }
 
 
@@ -22,7 +22,14 @@ def load_config():
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
-                return json.load(f)
+                config = json.load(f)
+                # Ensure selected_model exists
+                if "selected_model" not in config:
+                    config["selected_model"] = "C4 Air"
+                # Ensure poll_interval exists and is at least 3
+                if "poll_interval" not in config or config.get("poll_interval", 0) < 3:
+                    config["poll_interval"] = 3
+                return config
         except:
             pass
     return DEFAULT_CONFIG.copy()
@@ -30,5 +37,8 @@ def load_config():
 
 def save_config(config):
     """Save configuration to JSON file."""
+    # Ensure poll_interval is at least 3
+    if config.get("poll_interval", 0) < 3:
+        config["poll_interval"] = 3
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)

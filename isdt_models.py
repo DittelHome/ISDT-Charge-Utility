@@ -44,7 +44,7 @@ ISDT_MODELS = {
     "A4 Air": {
         "slots": 4,
         "max_current_mA": 1000,
-        "battery_types": ["NiMh/NiCd", "LiIon", "LiFe", "Auto"],
+        "battery_types": ["LiHV", "LiIon", "LiFe", "NiZn", "NiMh/NiCd", "LiIon(1.5V)", "Auto"],
         "display_name": "A4 Air",
         "supports_alarm": True,
         "default_current_mA": 300,
@@ -54,7 +54,7 @@ ISDT_MODELS = {
     "A8 Air": {
         "slots": 8,
         "max_current_mA": 1000,
-        "battery_types": ["LiHV", "NiMh/NiCd", "LiIon", "LiFe", "Auto"],
+        "battery_types": ["LiHV", "LiIon", "LiFe", "NiZn", "NiMh/NiCd", "LiIon(1.5V)", "Auto"],
         "display_name": "A8 Air",
         "supports_alarm": True,
         "default_current_mA": 300,
@@ -229,10 +229,10 @@ def detect_model_from_device_name(device_name: str) -> str:
         device_name: The BLE device name as reported during scan
         
     Returns:
-        The model key (e.g., "C4 Air") or "C4 Air" as fallback
+        The model key (e.g., "C4 Air") or "unknown" if no model detected
     """
-    if not device_name:
-        return "C4 Air"
+    if not device_name or device_name == "unknown":
+        return "unknown"
     
     # Remove spaces and convert to uppercase for case-insensitive matching
     device_name_clean = device_name.replace(" ", "").upper()
@@ -254,8 +254,8 @@ def detect_model_from_device_name(device_name: str) -> str:
     elif "NP2" in device_name_clean:
         return "NP2 Air"
     
-    # Ultimate fallback - assume C4 Air
-    return "C4 Air"
+    # No model detected -> return "unknown"
+    return "unknown"
 
 
 def detect_model_from_bind_response(bind_response: bytes) -> str:
@@ -269,10 +269,10 @@ def detect_model_from_bind_response(bind_response: bytes) -> str:
         bind_response: The raw bytes from the bind response
         
     Returns:
-        The model key or "C4 Air" as fallback
+        The model key or "unknown" if no model detected
     """
     if not bind_response or len(bind_response) < 3:
-        return "C4 Air"
+        return "unknown"
     
     # Byte 2 often contains a model identifier
     if len(bind_response) >= 3:
@@ -292,4 +292,4 @@ def detect_model_from_bind_response(bind_response: bytes) -> str:
         elif model_id == 0x01:
             return "C4 Air"
     
-    return "C4 Air"
+    return "unknown"
