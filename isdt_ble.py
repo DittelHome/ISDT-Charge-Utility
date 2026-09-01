@@ -75,11 +75,12 @@ class ISDTBLE:
         self._last_occupied_slots = None
         self._cached_workstate = {}
         self._alarm_tone_state = False
+        self._last_bind_response = None
 
         if self.model_detected:
-            self._log(f"📱 Model detected from device name: {self.model_key}", force=True)
+            self._log(f"Model detected from device name: {self.model_key}", force=True)
         else:
-            self._log("⚠️ No device name provided, will detect later", force=True)
+            self._log("No device name provided, will detect later", force=True)
 
     def _log(self, msg, force=False):
         if self.debug or force:
@@ -90,12 +91,12 @@ class ISDTBLE:
         if not device_name:
             return "C4 Air"
         detected = detect_model_from_device_name(device_name)
-        self._log(f"🔍 Device name '{device_name}' → Model: {detected}", force=True)
+        self._log(f"Device name '{device_name}' → Model: {detected}", force=True)
         return detected
 
     def notification_handler(self, sender: BleakGATTCharacteristic, data: bytearray):
         if self.debug:
-            self._log(f"📩 Notification: {data.hex()}")
+            self._log(f"Notification: {data.hex()}")
         asyncio.create_task(self.notification_queue.put(bytes(data)))
 
     async def _send_command_and_wait(self, cmd: bytes, expected_opcode: int, timeout: float = 2.0) -> bytes | None:
@@ -121,7 +122,7 @@ class ISDTBLE:
         return None
 
     async def _initialize(self):
-        self._log("✅ Initializing...", force=True)
+        self._log("Initializing...", force=True)
 
         # --- Hardware info ---
         try:
@@ -132,38 +133,38 @@ class ISDTBLE:
                 parsed = parse_hardware_info(resp)
                 if parsed:
                     self._log(
-                        f"📋 FW: v{parsed['fw_version']}, HW: v{parsed['hw_version']}, SN: {parsed['serial']}",
+                        f"FW: v{parsed['fw_version']}, HW: v{parsed['hw_version']}, SN: {parsed['serial']}",
                         force=True
                     )
                 else:
-                    self._log(f"📋 Hardware-Info (raw): {resp.hex()}", force=True)
+                    self._log(f"Hardware-Info (raw): {resp.hex()}", force=True)
             except asyncio.TimeoutError:
-                self._log("⚠️ HW-Info timeout – continuing", force=True)
+                self._log("HW-Info timeout – continuing", force=True)
         except Exception as e:
             self._log(f"HW-Info error: {e}", force=True)
 
         # --- Bind handshake ---
-        self._log("✅ Bind handshake...", force=True)
+        self._log("Bind handshake...", force=True)
 
         bind_uuid_hex = self.config.get("bind_uuid", "")
         if bind_uuid_hex:
             try:
                 bind_uuid = bytes.fromhex(bind_uuid_hex)
-                self._log(f"📋 Using stored UUID: {bind_uuid_hex}", force=True)
+                self._log(f"Using stored UUID: {bind_uuid_hex}", force=True)
             except ValueError:
                 bind_uuid = uuid.uuid4().bytes
-                self._log("⚠️ Invalid stored UUID – generating new one.", force=True)
+                self._log("Invalid stored UUID – generating new one.", force=True)
                 self.config["bind_uuid"] = bind_uuid.hex()
                 from isdt_config import save_config
                 save_config(self.config)
-                self._log(f"📋 New UUID saved to config.", force=True)
+                self._log(f"New UUID saved to config.", force=True)
         else:
             bind_uuid = uuid.uuid4().bytes
-            self._log("📋 Generated new UUID.", force=True)
+            self._log("Generated new UUID.", force=True)
             self.config["bind_uuid"] = bind_uuid.hex()
             from isdt_config import save_config
             save_config(self.config)
-            self._log(f"📋 New UUID saved to config.", force=True)
+            self._log(f"New UUID saved to config.", force=True)
 
         cmd = struct.pack("<B", CMD_BIND_REQ) + bind_uuid + b"\x00\x00"
         await self.client.write_gatt_char(CHAR_UUID_AF02, cmd)
@@ -177,8 +178,9 @@ class ISDTBLE:
                 if self.debug:
                     self._log(f"Intermediate response: {resp.hex()}")
                 if len(resp) > 1 and resp[1] == CMD_BIND_RESP:
-                    self._log("✅ Bind successful!", force=True)
+                    self._log("Bind successful!", force=True)
                     self.bind_done = True
+                    self._last_bind_response = resp
                     if not self.model_detected:
                         model_key = detect_model_from_bind_response(resp)
                         if model_key != self.model_key:
@@ -188,11 +190,12 @@ class ISDTBLE:
                             self.max_current_mA = self.model_config["max_current_mA"]
                             self.supported_battery_types = self.model_config["battery_types"]
                             self.model_detected = True
-                            self._log(f"📱 Model detected from bind response: {self.model_key}", force=True)
+                            self._log(f"Model detected from bind response: {self.model_key}", force=True)
                     break
                 elif len(resp) > 0 and resp[0] == CMD_BIND_RESP:
-                    self._log("✅ Bind successful!", force=True)
+                    self._log("Bind successful!", force=True)
                     self.bind_done = True
+                    self._last_bind_response = resp
                     if not self.model_detected:
                         model_key = detect_model_from_bind_response(resp)
                         if model_key != self.model_key:
@@ -202,27 +205,27 @@ class ISDTBLE:
                             self.max_current_mA = self.model_config["max_current_mA"]
                             self.supported_battery_types = self.model_config["battery_types"]
                             self.model_detected = True
-                            self._log(f"📱 Model detected from bind response: {self.model_key}", force=True)
+                            self._log(f"Model detected from bind response: {self.model_key}", force=True)
                     break
             except asyncio.TimeoutError:
                 continue
 
         if not self.bind_done:
-            self._log("⚠️ No bind confirmation.", force=True)
+            self._log("No bind confirmation.", force=True)
 
         if self.model_detected:
-            self._log(f"📊 Model: {self.model_key} with {self.num_slots} slots", force=True)
-            self._log(f"📊 Max current: {self.max_current_mA} mA", force=True)
-            self._log(f"📊 Battery types: {', '.join(self.supported_battery_types)}", force=True)
+            self._log(f"Model: {self.model_key} with {self.num_slots} slots", force=True)
+            self._log(f"Max current: {self.max_current_mA} mA", force=True)
+            self._log(f"Battery types: {', '.join(self.supported_battery_types)}", force=True)
         else:
-            self._log("⚠️ Could not detect model, using default (C4 Air)", force=True)
+            self._log("Could not detect model, using default (C4 Air)", force=True)
 
         # --- Start data stream ---
         try:
             await self.client.write_gatt_char(CHAR_UUID_AF02, struct.pack("<B", 0xE2))
             await asyncio.sleep(0.5)
         except Exception as e:
-            self._log(f"⚠️ Start data stream error: {e}", force=True)
+            self._log(f"Start data stream error: {e}", force=True)
 
         await asyncio.sleep(0.5)
 
@@ -234,21 +237,21 @@ class ISDTBLE:
         while attempt <= retries:
             try:
                 self.client = BleakClient(self.address)
-                self._log(f"⏳ Connecting... (attempt {attempt+1}/{retries+1})", force=True)
+                self._log(f"Connecting... (attempt {attempt+1}/{retries+1})", force=True)
                 await self.client.connect()
                 self.connected = True
-                self._log("✅ BLE connected.", force=True)
+                self._log("BLE connected.", force=True)
 
                 await asyncio.sleep(POST_CONNECT_SETTLE)
 
                 await self.client.start_notify(CHAR_UUID_AF01, self.notification_handler)
                 await self.client.start_notify(CHAR_UUID_AF02, self.notification_handler)
-                self._log("✅ Notification handlers registered.", force=True)
+                self._log("Notification handlers registered.", force=True)
 
                 await asyncio.sleep(POST_NOTIFICATION_SETUP)
 
                 await self._initialize()
-                self._log("✅ Initialization complete.", force=True)
+                self._log("Initialization complete.", force=True)
 
                 # Get initial alarm tone state
                 self._alarm_tone_state = await self.get_alarm_tone() or False
@@ -261,9 +264,9 @@ class ISDTBLE:
                 error_msg = str(e)
                 if error_msg == "":
                     error_msg = "Unknown BLE error (empty error message)"
-                self._log(f"⚠️ Connection error: {error_msg}", force=True)
+                self._log(f"Connection error: {error_msg}", force=True)
                 if "InProgress" in error_msg or "already" in error_msg.lower():
-                    self._log("⏳ Waiting 2s and retrying...", force=True)
+                    self._log("Waiting 2s and retrying...", force=True)
                     await asyncio.sleep(2)
             attempt += 1
             
@@ -398,9 +401,9 @@ class ISDTBLE:
             self._poll_timeout_counter = 0
         else:
             self._poll_timeout_counter += 1
-            self._log(f"⏳ No response (timeout counter: {self._poll_timeout_counter}/{self._max_timeouts})", force=True)
+            self._log(f"No response (timeout counter: {self._poll_timeout_counter}/{self._max_timeouts})", force=True)
             if self._poll_timeout_counter >= self._max_timeouts:
-                self._log("⚠️ Device no longer responding – disconnecting.", force=True)
+                self._log("Device no longer responding – disconnecting.", force=True)
                 await self.disconnect()
                 return False
 
@@ -439,7 +442,7 @@ class ISDTBLE:
             return False
 
         if work_current_mA > self.max_current_mA:
-            self._log(f"⚠️ Current {work_current_mA}mA exceeds model maximum {self.max_current_mA}mA", force=True)
+            self._log(f"Current {work_current_mA}mA exceeds model maximum {self.max_current_mA}mA", force=True)
             return False
 
         cmd = bytearray()
@@ -472,4 +475,4 @@ class ISDTBLE:
             self.connected = False
             self._poll_timeout_counter = 0
             self._last_occupied_slots = None
-            self._log("⚠️ Disconnected", force=True)
+            self._log("Disconnected", force=True)

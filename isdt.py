@@ -388,6 +388,11 @@ class ISDTGui:
     # Model-specific GUI Updates
     # ------------------------------------------------------------------
 
+
+
+
+
+
     def update_gui_for_model(self):
         """
         Update GUI elements based on the detected model.
@@ -404,6 +409,11 @@ class ISDTGui:
 
         model_key = self.device.model_key
         model_config = self.device.model_config
+
+        # Debug information about model detection
+        self.log_message(f"Detected model: {model_config['display_name']} (Key: {model_key})")
+        self.log_message(f"Device name from config: {self.config.get('device_name', 'unknown')}")
+        self.log_message(f"Slots: {model_config['slots']}, Max current: {model_config['max_current_mA']}mA")
 
         # Update window title
         self.root.title(f"ISDT {model_config['display_name']} – Monitor & Control")
@@ -428,10 +438,14 @@ class ISDTGui:
 
         # Log model details
         max_current = model_config["max_current_mA"]
-        self.log_message(f"📊 Model: {model_config['display_name']} ({num_slots} slots, max {max_current}mA)")
+        self.log_message(f"Model: {model_config['display_name']} ({num_slots} slots, max {max_current}mA)")
 
         # Reset GUI cache for correct display
         self._last_table_values = []
+
+
+
+
 
     # ------------------------------------------------------------------
     # Logging & Status Updates

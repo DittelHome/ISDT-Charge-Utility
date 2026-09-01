@@ -59,7 +59,7 @@ ISDT_MODELS = {
         "supports_alarm": True,
         "default_current_mA": 300,
         "default_capacity_mAh": 2500,
-        "name_patterns": ["A8Air", "A8 Air", "0000A8Air"],
+        "name_patterns": ["A8Air", "A8 Air", "0000A8Air", "A8"],
     },
     "NP2 Air": {
         "slots": 2,
@@ -285,7 +285,11 @@ def detect_model_from_bind_response(bind_response: bytes) -> str:
             return "A4 Air"
         elif model_id == 0x03:
             return "A8 Air"
+        elif model_id == 0x05:
+            return "A8 Air"
         elif model_id == 0x06:
             return "NP2 Air"
+        elif model_id == 0x01:
+            return "C4 Air"
     
     return "C4 Air"
