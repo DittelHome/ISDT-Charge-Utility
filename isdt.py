@@ -39,6 +39,11 @@ import sys
 import os
 
 # ============================================================
+# VERSION
+# ============================================================
+APP_VERSION = "1.0.1"
+
+# ============================================================
 # WINDOWS TASKLEISTE ICON FIX
 # ============================================================
 if sys.platform == "win32":
@@ -334,6 +339,7 @@ class ISDTGui:
         - MAC address
         - Model selection (dropdown)
         - Poll interval (minimum 3 seconds)
+        - Version information
         """
         main_frame = ttk.Frame(self.tab_settings, padding=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -355,8 +361,8 @@ class ISDTGui:
         self.device_listbox.pack(fill=tk.X, pady=5)
         self.device_listbox.bind("<<ListboxSelect>>", self.on_device_select)
 
-        self.save_btn = ttk.Button(left_frame, text="Save selected device",
-                                   command=self.save_selected_device, state=tk.DISABLED)
+        self.save_btn = ttk.Button(left_frame, text="Select",
+                                   command=self.select_device, state=tk.DISABLED)
         self.save_btn.pack(anchor=tk.W, pady=10)
 
         # ---- Right column: Settings ----
@@ -387,6 +393,10 @@ class ISDTGui:
 
         save_settings_btn = ttk.Button(right_frame, text="Save settings", command=self.save_settings)
         save_settings_btn.pack(anchor=tk.W, pady=20)
+
+        # ---- Version information ----
+        version_label = ttk.Label(right_frame, text=f"Version: {APP_VERSION}", foreground="gray")
+        version_label.pack(anchor=tk.W, pady=(20, 0))
 
     # ------------------------------------------------------------------
     # Model-specific GUI Updates
@@ -1053,22 +1063,26 @@ class ISDTGui:
         selection = self.device_listbox.curselection()
         self.save_btn.config(state=tk.NORMAL if selection else tk.DISABLED)
 
-    def save_selected_device(self):
+    def select_device(self):
+        """
+        Select a device from the scan list and copy its data to the settings fields.
+        Does NOT save to config - use "Save settings" to persist.
+        """
         selection = self.device_listbox.curselection()
         if not selection:
             return
         idx = selection[0]
         device = self.scanned_devices[idx]
 
-        self.config["mac_address"] = device.address
-        # Keep existing model selection and poll interval
-        save_config(self.config)
-
+        # Copy MAC address to settings field
         self.settings_mac.delete(0, tk.END)
         self.settings_mac.insert(0, device.address)
 
-        self.log_message(f"✅ Saved: {device.name} ({device.address})")
-        messagebox.showinfo("Success", f"Device saved:\n{device.name}\n{device.address}")
+        # Note: Model and poll interval are NOT changed by selecting a device.
+        # The user must change them manually and click "Save settings".
+
+        self.log_message(f"✅ Selected: {device.name} ({device.address})")
+        messagebox.showinfo("Selected", f"Device selected:\n{device.name}\n{device.address}\n\nClick 'Save settings' to store.")
 
     # ------------------------------------------------------------------
     # Save Settings

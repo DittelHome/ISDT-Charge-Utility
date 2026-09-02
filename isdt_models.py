@@ -7,7 +7,6 @@ This file contains all model-specific settings including:
 - Maximum charging current
 - Supported battery types
 - Display names
-- Device name patterns for auto-detection
 - Battery type mappings
 - Battery-specific validation limits (including default cut-off values)
 - Global current limits
@@ -28,7 +27,6 @@ from typing import Dict, Any, List
 # - supports_alarm: Whether the device supports the alarm tone feature
 # - default_current_mA: Default charging current (used as initial value)
 # - default_capacity_mAh: Default capacity limit (used as initial value)
-# - name_patterns: List of strings to match against BLE device names
 # ------------------------------------------------------------------
 ISDT_MODELS = {
     "C4 Air": {
@@ -39,7 +37,6 @@ ISDT_MODELS = {
         "supports_alarm": True,
         "default_current_mA": 300,
         "default_capacity_mAh": 2500,
-        "name_patterns": ["C4Air", "C4 Air", "0000C4Air"],
     },
     "A4 Air": {
         "slots": 4,
@@ -49,7 +46,6 @@ ISDT_MODELS = {
         "supports_alarm": True,
         "default_current_mA": 300,
         "default_capacity_mAh": 2500,
-        "name_patterns": ["A4Air", "A4 Air", "0000A4Air"],
     },
     "A8 Air": {
         "slots": 8,
@@ -59,7 +55,6 @@ ISDT_MODELS = {
         "supports_alarm": True,
         "default_current_mA": 300,
         "default_capacity_mAh": 2500,
-        "name_patterns": ["A8Air", "A8 Air", "0000A8Air", "A8"],
     },
     "NP2 Air": {
         "slots": 2,
@@ -69,7 +64,6 @@ ISDT_MODELS = {
         "supports_alarm": True,
         "default_current_mA": 300,
         "default_capacity_mAh": 5000,
-        "name_patterns": ["NP2Air", "NP2 Air", "0000NP2Air"],
     },
 }
 
@@ -215,81 +209,34 @@ def get_default_current(model_key: str) -> int:
     return config.get("default_current_mA", 300)
 
 
+# ------------------------------------------------------------------
+# Deprecated Auto-Detection Functions (kept for reference)
+# These are no longer used because model selection is manual.
+# ------------------------------------------------------------------
+
 def detect_model_from_device_name(device_name: str) -> str:
     """
-    Detect the ISDT model from the BLE device name.
-    
-    The device name typically follows this pattern:
-    - "0000C4Air S00" → C4 Air
-    - "0000A4Air S00" → A4 Air
-    - "0000A8Air S00" → A8 Air
-    - "0000NP2Air S00" → NP2 Air
+    DEPRECATED: Model detection from BLE device name.
+    No longer used because model selection is manual.
     
     Args:
         device_name: The BLE device name as reported during scan
         
     Returns:
-        The model key (e.g., "C4 Air") or "unknown" if no model detected
+        "unknown" always (placeholder)
     """
-    if not device_name or device_name == "unknown":
-        return "unknown"
-    
-    # Remove spaces and convert to uppercase for case-insensitive matching
-    device_name_clean = device_name.replace(" ", "").upper()
-    
-    # Try to match against known name patterns for each model
-    for model_key, config in ISDT_MODELS.items():
-        for pattern in config.get("name_patterns", []):
-            pattern_clean = pattern.replace(" ", "").upper()
-            if pattern_clean in device_name_clean:
-                return model_key
-    
-    # Fallback: Look for model identifiers in the device name
-    if "C4" in device_name_clean:
-        return "C4 Air"
-    elif "A4" in device_name_clean:
-        return "A4 Air"
-    elif "A8" in device_name_clean:
-        return "A8 Air"
-    elif "NP2" in device_name_clean:
-        return "NP2 Air"
-    
-    # No model detected -> return "unknown"
     return "unknown"
 
 
 def detect_model_from_bind_response(bind_response: bytes) -> str:
     """
-    Fallback: Detect model from the bind response.
-    
-    The bind response may contain a model ID at byte position 2.
-    This is used when no device name is available.
+    DEPRECATED: Model detection from bind response.
+    No longer used because model selection is manual.
     
     Args:
         bind_response: The raw bytes from the bind response
         
     Returns:
-        The model key or "unknown" if no model detected
+        "unknown" always (placeholder)
     """
-    if not bind_response or len(bind_response) < 3:
-        return "unknown"
-    
-    # Byte 2 often contains a model identifier
-    if len(bind_response) >= 3:
-        model_id = bind_response[2]
-        
-        # Map model IDs to model keys
-        if model_id == 0x04:
-            return "C4 Air"
-        elif model_id == 0x02:
-            return "A4 Air"
-        elif model_id == 0x03:
-            return "A8 Air"
-        elif model_id == 0x05:
-            return "A8 Air"
-        elif model_id == 0x06:
-            return "NP2 Air"
-        elif model_id == 0x01:
-            return "C4 Air"
-    
     return "unknown"
