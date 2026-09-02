@@ -8,7 +8,6 @@ Monitor and control your ISDT charger via Bluetooth Low Energy (BLE), including 
 
 - Direct Bluetooth Low Energy (BLE) connection.  
 - Works under Windows and Linux.
-- **Automatic model detection** – Supports C4 Air (6 slots), A4 Air (4 slots), A8 Air (8 slots) and NP2 Air (2 slots)
 
 
 ![Python Version](https://img.shields.io/badge/python-3.13+-blue.svg)
@@ -50,7 +49,6 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 ### 📊 Monitoring
 - **BLE Connection** – Direct communication with ISDT C4/A4/A8/NP2 Air
 - **Auto-Connect** – Saved MAC address is used on startup
-- **Automatic Model Detection** – Detects C4 Air (6 slots), A4 Air (4 slots), A8 Air (8 slots), NP2 (2 slots)
 - **Dynamic GUI** – Adapts slot count and battery types based on detected model
 - **Detailed Status** – Pre‑charge, CC, CV, done, error
 - **Charge Time** – Read directly from the device
@@ -63,8 +61,8 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 ### ⚡ Control
 - **Set Battery Type** – Model-dependent:
   - C4 Air: LiHV, LiIon, LiFe, NiZn, NiMh/NiCd, LiIon(1.5V), Auto
-  - A4 Air: NiMh/NiCd, LiIon, LiFe, Auto
-  - A8 Air: LiHV, NiMh/NiCd, LiIon, LiFe, Auto
+  - A4 Air: LiHV, LiIon, LiFe, NiZn, NiMh/NiCd, LiIon(1.5V), Auto
+  - A8 Air: LiHV, LiIon, LiFe, NiZn, NiMh/NiCd, LiIon(1.5V), Auto
   - NP2 Air: Auto
 - **Set Charge Current** – 100–2000 mA (model-dependent maximum)
 - **Set Capacity Limit** – Battery‑specific ranges (0 = unlimited)
@@ -72,7 +70,7 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 - **Alarm Tone** – Toggle on/off with a single click (🔊/🔇)
 - **Battery‑specific Validation** – Prevents invalid values
 - **Model‑specific Validation** – Prevents unsupported battery types
-- **Persistent Settings** – MAC, device name, interval, Bind UUID are saved
+- **Persistent Settings** – MAC, device, interval, Bind UUID are saved
 
 ---
 
@@ -82,10 +80,8 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 |-------------|-------|-------------|---------------------------|
 | ISDT C4 Air | 6     | 2000mA      | ✅ Fully supported        |
 | ISDT A4 Air | 4     | 1000mA      | ❓ Test outstanding (need testers) |
-| ISDT A8 Air | 8     | 1000mA      | ❓ Test outstanding (need testers) |
+| ISDT A8 Air | 8     | 1000mA      | ✅ Fully supported   |
 | ISDT NP2 Air| 2     | 1500mA      | ❓ Test outstanding (need testers) |
-
-> **Note:** This software was developed for the C4 Air and extended to support A4 Air and A8 Air. Other models may work but have not been tested.
 
 ---
 
@@ -96,6 +92,7 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 - **No Python installation required!**
 
 ### Windows (Python - for developers)
+- **Windows 10 or 11** (with Bluetooth 4.0+)
 - **Python 3.13 or higher** 
 
 ### Linux
@@ -166,7 +163,6 @@ python3 isdt.py
 1. **Start the app** – Double-click the `ISDT-Charge-Utility.exe` or run `python isdt.py`
 2. **Scan and save your device** – Settings tab → Scan → Select → Save
 3. **Connect** – Device tab → Connect (saved)
-4. The GUI will automatically adapt to your connected model
 
 ---
 
@@ -174,7 +170,7 @@ python3 isdt.py
 
 1. **Select a slot** – Click on a table row or use the **"Slot"** dropdown
 2. **Adjust values** – Battery type, Current, Capacity limit, Cut‑off
-3. **Apply** – Click the red **"Apply"** button (a beep confirms)
+3. **Apply** – Click the red **"Apply"** button
 4. **Alarm Tone** – Click the speaker icon (🔊/🔇) to toggle
 
 ---
@@ -230,7 +226,6 @@ python3 isdt.py
 | `isdt_config.py` | Settings load/save |
 | `isdt_models.py` | Model definitions (C4/A4/A8 Air) |
 | `icon.png` / `icon.ico` | Application icon |
-| `ISDT-Charge-Utility.exe` | Windows executable |
 | `PROTOCOL.md` | Technical BLE protocol documentation |
 
 ---
@@ -243,10 +238,10 @@ Settings are stored in:
 
 ```json
 {
-    "mac_address": "50:54:7B:63:4B:A3",
-    "device_name": "ISDT C4 Air",
-    "poll_interval": 5,
-    "bind_uuid": "3c7a0e1ea9fb4919bb268c617e0ff89c"
+  "mac_address": "50:54:7B:63:4B:A3",
+  "bind_uuid": "ccaadfc455b8499ea807b295c3657250",
+  "selected_model": "C4 Air",
+  "poll_interval": 3
 }
 ```
 
@@ -285,14 +280,6 @@ self.device = ISDTBLE(mac, log_callback=self.log_message, debug=True)
 
 The BLE protocol is based on the documentation from the [Home Assistant Integration](https://github.com/mtheli/isdt_air_ble) for reading, and reverse‑engineered from the ISD Link Android app for writing. See [Protocol description](https://github.com/DittelHome/ISDT-Charge-Utility/blob/main/PROTOCOL.md)
 
-### Model Detection
-
-The software automatically detects the connected model using the BLE device name:
-- `0000C4Air S00` → C4 Air (6 slots)
-- `0000A4Air S00` → A4 Air (4 slots)
-- `0000A8Air S00` → A8 Air (8 slots)
-
-The GUI adapts dynamically to the detected model.
 
 ---
 
