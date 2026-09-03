@@ -43,7 +43,7 @@ ISDT_MODELS = {
         "max_current_mA": 1000,
         "battery_types": ["LiHV", "LiIon", "LiFe", "NiZn", "NiMh/NiCd", "LiIon(1.5V)", "Auto"],
         "display_name": "A4 Air",
-        "supports_alarm": True,
+        "supports_alarm": False,  # A4 Air does NOT support alarm tone
         "default_current_mA": 300,
         "default_capacity_mAh": 2500,
     },
@@ -52,7 +52,7 @@ ISDT_MODELS = {
         "max_current_mA": 1000,
         "battery_types": ["LiHV", "LiIon", "LiFe", "NiZn", "NiMh/NiCd", "LiIon(1.5V)", "Auto"],
         "display_name": "A8 Air",
-        "supports_alarm": True,
+        "supports_alarm": False,  # A8 Air does NOT support alarm tone
         "default_current_mA": 300,
         "default_capacity_mAh": 2500,
     },

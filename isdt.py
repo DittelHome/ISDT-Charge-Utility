@@ -179,7 +179,7 @@ class ISDTGui:
         self.total_power_label.pack(side=tk.LEFT, padx=15)
 
         # Connect/Disconnect buttons
-        self.connect_btn = ttk.Button(left_frame, text="Connect (saved)", command=self.connect_saved)
+        self.connect_btn = ttk.Button(left_frame, text="Connect", command=self.connect_saved)
         self.connect_btn.pack(side=tk.LEFT, padx=2)
 
         self.disconnect_btn = ttk.Button(left_frame, text="Disconnect", command=self.disconnect_device, state=tk.DISABLED)
@@ -333,7 +333,7 @@ class ISDTGui:
         Left column: Scan area
         - Scan button
         - Listbox with found devices
-        - Save button to store selected device
+        - Select button to store selected device
 
         Right column: Settings
         - MAC address
@@ -419,10 +419,6 @@ class ISDTGui:
         model_key = self.device.model_key
         model_config = self.device.model_config
 
-        # Debug information for model detection
-        self.log_message(f"🔍 Model: {model_config['display_name']} (Key: {model_key})")
-        self.log_message(f"🔍 Slots: {model_config['slots']}, Max current: {model_config['max_current_mA']}mA")
-
         # Update window title
         self.root.title(f"ISDT {model_config['display_name']} – Monitor & Control")
 
@@ -445,8 +441,17 @@ class ISDTGui:
                 self._on_battery_type_changed()
 
         # Log model details
-        max_current = model_config["max_current_mA"]
-        self.log_message(f"📊 Model: {model_config['display_name']} ({num_slots} slots, max {max_current}mA)")
+        self.log_message(f"📊 Model: {model_config['display_name']} ({num_slots} slots, max {model_config['max_current_mA']}mA)")
+
+        # Update alarm button state based on model support
+        if hasattr(self.device, 'supports_alarm') and not self.device.supports_alarm:
+            self.alarm_btn.config(state=tk.DISABLED, text="🔇")
+        else:
+            self.alarm_btn.config(state=tk.NORMAL)
+
+        # A8 Air specific hint
+        if hasattr(self.device, 'is_a8') and self.device.is_a8:
+            self.log_message("📊 A8 Air: Using mega-packet polling (all slots at once)")
 
         # Reset GUI cache for correct display
         self._last_table_values = []
@@ -456,9 +461,11 @@ class ISDTGui:
     # ------------------------------------------------------------------
 
     def log_message(self, msg):
-        """Adds a message to the log window (with newline)."""
+        """Adds a message to the log window (with newline) and includes timestamp."""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         self.log.config(state='normal')
-        self.log.insert(tk.END, msg + "\n")
+        self.log.insert(tk.END, f"[{timestamp}] {msg}\n")
         self.log.see(tk.END)
         self.log.config(state='disabled')
 
@@ -619,6 +626,11 @@ class ISDTGui:
         try:
             success = await self.device.connect(retries=2)
             if success:
+                # Reload config to get any changes made by other apps
+                self.config = load_config()
+                # Update BLE config if possible
+                if hasattr(self.device, 'config'):
+                    self.device.config = self.config
                 self.root.after(0, lambda: self.log_message("✅ Connected!"))
                 self.root.after(0, lambda: self.update_status(
                     f"Connected to {self.config.get('selected_model', 'ISDT')}", "green"
@@ -626,7 +638,8 @@ class ISDTGui:
                 self.root.after(0, lambda: self.connect_btn.config(state=tk.DISABLED))
                 self.root.after(0, lambda: self.disconnect_btn.config(state=tk.NORMAL))
                 self.root.after(0, self.update_gui_for_model)
-                self.start_polling()
+                # Polling erst nach 500ms starten (Device muss bereit sein)
+                self.root.after(500, self.start_polling)
                 self.root.after(1000, self.update_settings_fields)
                 await self._update_alarm_button()
             else:
@@ -647,12 +660,10 @@ class ISDTGui:
         if self.device:
             # Stop polling first
             self.polling = False
-            # Schedule disconnect and wait for it to complete
-            future = asyncio.run_coroutine_threadsafe(self.device.disconnect(), self.loop)
-            try:
-                future.result(timeout=3.0)  # Wait up to 3 seconds
-            except Exception as e:
-                self.log_message(f"⚠️ Disconnect timeout: {e}")
+            # Schedule disconnect - fire and forget (non-blocking)
+            asyncio.run_coroutine_threadsafe(self.device.disconnect(), self.loop)
+            # Give it a moment to start the disconnect
+            time.sleep(0.1)
             self.device = None
 
         self.connect_btn.config(state=tk.NORMAL)
@@ -671,8 +682,11 @@ class ISDTGui:
 
     def start_polling(self):
         """Starts the polling loop (automatically started after connection)."""
-        if not self.device or not self.device.connected:
-            self.log_message("⚠️ No device connected.")
+        if not self.device:
+            self.log_message("⚠️ No device object.")
+            return
+        if not self.device.connected:
+            self.log_message("⚠️ Device not connected.")
             return
         if self.polling:
             return
@@ -690,6 +704,17 @@ class ISDTGui:
             interval: Normal polling interval in seconds (when slots are active)
             idle_interval: Polling interval when no slots are active (longer = less traffic)
         """
+        # Wait for device to be ready
+        for _ in range(10):  # 5 seconds max
+            if self.device and self.device.connected:
+                break
+            await asyncio.sleep(0.5)
+        
+        if not self.device or not self.device.connected:
+            self.log_message("⚠️ Device not ready, polling cancelled.")
+            self.polling = False
+            return
+        
         while self.polling and self.device and self.device.connected:
             still_connected = await self.device.poll_data()
             self.root.after(0, self.update_table)
@@ -697,7 +722,10 @@ class ISDTGui:
             if not still_connected:
                 self.polling = False
                 self.root.after(0, lambda: self.log_message("⚠️ Connection lost – reconnecting..."))
-                self.root.after(2000, self.connect_saved)
+                if sys.platform == "win32":
+                    self.root.after(5000, self.connect_saved)
+                else:
+                    self.root.after(1000, self.connect_saved)
                 break
 
             await asyncio.sleep(interval if self.device._last_occupied_slots else idle_interval)
@@ -786,6 +814,7 @@ class ISDTGui:
             input_current_mA = elec1.get("input_current_mA", 0)
 
         num_slots = self.device.num_slots
+        is_a8 = self.device.is_a8
 
         for slot in range(1, num_slots + 1):
             work = self.device.latest_data.get(f"slot{slot}_workstate", {})
@@ -816,7 +845,7 @@ class ISDTGui:
             max_current = work.get("max_current_mA", 0)
             max_current_display = str(max_current) if max_current > 0 else "0"
 
-            # --- Cap Limit - always from WorkState, 0 → "no limit" ---
+            # --- Cap Limit - show for all models (now available for A8 Air via A8TaskResp) ---
             cap_limit = work.get("max_output_power_mW", 0)
             cap_limit_display = str(cap_limit) if cap_limit > 0 else "no limit"
 
@@ -916,7 +945,6 @@ class ISDTGui:
 
         if input_voltage_mV > 0:
             self.root.after(0, lambda: self.update_device_info(input_voltage_mV, input_current_mA))
-
     # ------------------------------------------------------------------
     # Slot Selection
     # ------------------------------------------------------------------
@@ -1009,6 +1037,8 @@ class ISDTGui:
 
     async def _update_alarm_button(self):
         if self.device and self.device.connected:
+            if not self.device.supports_alarm:
+                return
             state = await self.device.get_alarm_tone()
             if state is not None:
                 self.root.after(0, lambda: self.alarm_btn.config(text="🔊" if state else "🔇"))
@@ -1016,6 +1046,9 @@ class ISDTGui:
     def toggle_alarm_tone(self):
         if not self.device or not self.device.connected:
             messagebox.showerror("Error", "No device connected.")
+            return
+        if not self.device.supports_alarm:
+            messagebox.showinfo("Info", "Alarm tone is not supported by this model.")
             return
         new_state = not self.device._alarm_tone_state
         asyncio.run_coroutine_threadsafe(self._toggle_alarm_async(new_state), self.loop)
@@ -1035,29 +1068,66 @@ class ISDTGui:
 
     def scan_devices(self):
         if self.scanning:
+            self.log_message("⚠️ Scan already in progress. Please wait.")
             return
         self.scanning = True
         self.scan_btn.config(state=tk.DISABLED)
-        self.scan_status.config(text="Searching...")
+        self.scan_status.config(text="Searching...", foreground="orange")
         self.device_listbox.delete(0, tk.END)
         self.log_message("🔎 Scanning for BLE devices (10 seconds)...")
+        # Force GUI update
+        self.root.update_idletasks()
         asyncio.run_coroutine_threadsafe(self._scan_async(), self.loop)
+
+        # Safety timeout: re-enable scan button after 15 seconds
+        self.root.after(15000, self._scan_timeout)
+
+    def _scan_timeout(self):
+        """Safety timeout for scan - re-enables scan button if scan hangs."""
+        if self.scanning:
+            self.scanning = False
+            self.scan_btn.config(state=tk.NORMAL)
+            self.scan_status.config(text="Scan timed out. Try again.", foreground="red")
+            self.log_message("⚠️ Scan timed out. Please try again.")
 
     async def _scan_async(self):
         from bleak import BleakScanner
-        devices = await BleakScanner.discover(timeout=10)
-        self.scanned_devices = [d for d in devices if d.name]
-        self.scanning = False
-        self.root.after(0, self._update_scan_results)
+        scanner = None
+        try:
+            scanner = BleakScanner()
+            devices = await scanner.discover(timeout=10)
+            self.scanned_devices = [d for d in devices if d.name]
+        except Exception as e:
+            error_msg = str(e)
+            if "InProgress" in error_msg:
+                self.log_message("⚠️ Scan already in progress. Please wait a moment and try again.")
+            else:
+                self.log_message(f"⚠️ Scan error: {error_msg}")
+            self.scanned_devices = []
+        finally:
+            if scanner:
+                try:
+                    await scanner.stop()
+                except Exception:
+                    pass
+            self.scanning = False
+            self.root.after(0, self._update_scan_results)
 
     def _update_scan_results(self):
         self.scan_btn.config(state=tk.NORMAL)
         self.device_listbox.delete(0, tk.END)
         for d in self.scanned_devices:
             self.device_listbox.insert(tk.END, f"{d.name} ({d.address})")
-        self.scan_status.config(text=f"{len(self.scanned_devices)} devices found")
-        self.log_message(f"✅ {len(self.scanned_devices)} devices found.")
+        
+        if len(self.scanned_devices) == 0:
+            self.scan_status.config(text="No devices found. Try scanning again.", foreground="orange")
+            self.log_message("🔍 No devices found. Try scanning again - sometimes it takes multiple attempts.")
+        else:
+            self.scan_status.config(text=f"{len(self.scanned_devices)} devices found", foreground="green")
+            self.log_message(f"✅ {len(self.scanned_devices)} devices found.")
+        
         self.save_btn.config(state=tk.NORMAL if self.scanned_devices else tk.DISABLED)
+        self.scanning = False
 
     def on_device_select(self, event):
         selection = self.device_listbox.curselection()
@@ -1084,19 +1154,15 @@ class ISDTGui:
         self.log_message(f"✅ Selected: {device.name} ({device.address})")
         messagebox.showinfo("Selected", f"Device selected:\n{device.name}\n{device.address}\n\nClick 'Save settings' to store.")
 
-    # ------------------------------------------------------------------
-    # Save Settings
-    # ------------------------------------------------------------------
-
     def save_settings(self):
         mac = self.settings_mac.get().strip()
         selected_model = self.settings_model.get().strip()
         try:
             interval = int(self.settings_interval.get().strip())
-            if interval < 3:
+            if interval < 2:
                 raise ValueError
         except ValueError:
-            messagebox.showerror("Error", "Please enter a valid number for the interval (≥ 3 seconds).")
+            messagebox.showerror("Error", "Please enter a valid number for the interval (≥ 2 seconds).")
             return
 
         if not mac:
@@ -1125,21 +1191,21 @@ class ISDTGui:
             batt_int = BATTERY_TYPE_STR_TO_INT.get(batt_str)
             if batt_int is None:
                 raise ValueError(f"Unknown battery type: {batt_str}")
-            
+
             current_raw = self.current_entry.get().strip()
             capacity_raw = self.capacity_entry.get().strip()
             cutoff_raw = self.cutoff_entry.get().strip()
-            
+
             if current_raw == "Auto" or current_raw == "":
                 current_mA = 0
             else:
                 current_mA = int(current_raw)
-                
+
             if capacity_raw == "no limit" or capacity_raw == "" or capacity_raw == "0":
                 capacity_mAh = 0
             else:
                 capacity_mAh = int(capacity_raw)
-                
+
             if cutoff_raw == "Auto" or cutoff_raw == "" or self.cutoff_entry.cget('state') == "disabled":
                 cutoff_mV = 0
             else:

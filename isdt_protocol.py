@@ -28,6 +28,9 @@ CMD_ELECTRIC = bytes([0x12, 0xE4])           # Query voltages/currents
 CMD_IR = bytes([0x13, 0xFA])                 # Query internal resistance
 CMD_WORKTASKS_REQ = 0xEA                     # Set charging parameters
 
+# A8 Air specific commands
+CMD_A8_TASK_REQ = bytes([0x12, 0xEC])        # A8 Air Task Query (Request)
+
 # Alarm tone
 CMD_ALARM_TONE_REQ = bytes([0x12, 0x92])     # Query alarm tone state
 CMD_ALARM_TONE_RESP = 0x93                   # Alarm tone response
@@ -40,6 +43,7 @@ CMD_ALARM_TONE_TASK_RESP = 0x9D              # Alarm tone set confirmation
 RESP_WORKSTATE = 0xE7
 RESP_ELECTRIC = 0xE5
 RESP_IR = 0xFB
+RESP_A8_TASK = 0xED                          # A8 Air Task Response
 
 # ------------------------------------------------------------------
 # Status Mappings
@@ -86,7 +90,7 @@ def parse_workstate(data: bytes) -> dict | None:
     return {
         "channel": data[2],
         "status": data[3],
-        "status_str": WORK_STATE_MAP.get(data[3], "unknown"),
+        "status_str": WORK_STATE_MAP.get(data[3], f"active ({data[3]})"),
         "capacity_percent": data[4],
         "capacity_mAh": int.from_bytes(data[5:9], "little"),
         "energy_mWh": int.from_bytes(data[9:13], "little"),
@@ -100,18 +104,159 @@ def parse_workstate(data: bytes) -> dict | None:
     }
 
 
+def parse_a8_workstate_mega(data: bytes) -> dict | None:
+    """
+    Parse A8 Air WorkState Mega-Packet (0xE7).
+    
+    The A8 Air sends a single 203-byte packet containing data for all 8 slots.
+    Format: [0x31, 0xE7, total_channels, channel_data × 8]
+    Total: 3 header bytes + 200 data bytes (8 × 25 bytes per channel)
+    
+    Per-channel format (25 bytes):
+    - 0: Work state (1 byte)
+    - 1: Capacity % (1 byte)
+    - 2-5: Capacity done (4 bytes, LE)
+    - 6-9: Energy done (4 bytes, LE)
+    - 10-13: Work period (4 bytes, LE)
+    - 14: Battery type (1 byte)
+    - 15-18: Work current (4 bytes, LE) -> mA (measured current)
+    - 19-20: Battery voltage (2 bytes, LE) -> mV
+    - 21-22: Internal resistance (2 bytes, LE) -> 0.01 mΩ (÷100 = mΩ)
+    - 23-24: Error code (2 bytes, LE)
+    """
+    if len(data) < 203 or data[1] != RESP_WORKSTATE:
+        return None
+    
+    # Byte 2 is total channels (should be 8)
+    total_channels = data[2]
+    if total_channels != 8:
+        # Not an A8 mega-packet
+        return None
+    
+    result = {}
+    offset = 3  # Start of channel data
+    
+    for channel in range(total_channels):
+        if offset + 25 > len(data):
+            break
+        
+        status = data[offset]
+        capacity_percent = data[offset + 1]
+        capacity_mAh = int.from_bytes(data[offset + 2:offset + 6], "little")
+        energy_mWh = int.from_bytes(data[offset + 6:offset + 10], "little")
+        work_period_ms = int.from_bytes(data[offset + 10:offset + 14], "little")
+        battery_type = data[offset + 14]
+        # work_current_mA - this is the MEASURED current
+        work_current_mA = int.from_bytes(data[offset + 15:offset + 19], "little")
+        voltage_mV = int.from_bytes(data[offset + 19:offset + 21], "little")
+        # IR is in 0.01 mΩ units (÷100 = mΩ)
+        ir_mohm = int.from_bytes(data[offset + 21:offset + 23], "little") / 100.0
+        error_code = int.from_bytes(data[offset + 23:offset + 25], "little")
+        
+        slot_data = {
+            "channel": channel,
+            "status": status,
+            "status_str": WORK_STATE_MAP.get(status, f"active ({status})"),
+            "capacity_percent": capacity_percent,
+            "capacity_mAh": capacity_mAh,
+            "energy_mWh": energy_mWh,
+            "work_period_ms": work_period_ms,
+            "battery_type": battery_type,
+            "battery_type_str": BATTERY_TYPE_MAP.get(battery_type, "unknown"),
+            "full_charged_volt_mV": 0,  # Not available in mega-packet
+            "max_current_mA": 0,  # Set current is NOT in mega-packet
+            "work_current_mA": work_current_mA,  # Measured current
+            "voltage_mV": voltage_mV,
+            "ir_mohm": ir_mohm,
+            "error_code": error_code,
+        }
+        
+        result[f"slot{channel + 1}"] = slot_data
+        offset += 25
+    
+    return result
+
+
+def parse_a8_task_resp(data: bytes) -> dict | None:
+    """
+    Parse A8 Air Task Response (0xED).
+    
+    Format: [0x31, 0xED, total_channels, channel_data × N]
+    Per channel: 12 bytes
+    - 0: taskType (1 byte)
+    - 1: batteryChemistry (1 byte)
+    - 2-5: current (4 bytes, LE) -> mA (MAX CURRENT!)
+    - 6-7: voltage (2 bytes, LE) -> mV
+    - 8-11: capacityLimit (4 bytes, LE) -> mAh (CAP LIMIT!)
+    
+    This is the response that contains the SET values (Max Current, Cap Limit).
+    """
+    if len(data) < 3 or data[1] != RESP_A8_TASK:
+        return None
+    
+    total_channels = data[2]
+    result = {}
+    offset = 3
+    
+    for channel in range(total_channels):
+        if offset + 12 > len(data):
+            break
+        
+        task_type = data[offset]
+        battery_type = data[offset + 1]
+        max_current_mA = int.from_bytes(data[offset + 2:offset + 6], "little")
+        voltage_mV = int.from_bytes(data[offset + 6:offset + 8], "little")
+        cap_limit_mAh = int.from_bytes(data[offset + 8:offset + 12], "little")
+        
+        slot_data = {
+            "channel": channel,
+            "task_type": task_type,
+            "battery_type": battery_type,
+            "battery_type_str": BATTERY_TYPE_MAP.get(battery_type, "unknown"),
+            "max_current_mA": max_current_mA,
+            "voltage_mV": voltage_mV,
+            "max_output_power_mW": cap_limit_mAh,
+        }
+        
+        result[f"slot{channel + 1}"] = slot_data
+        offset += 12
+    
+    return result
+
+
 def parse_electric(data: bytes) -> dict | None:
     """
     Parse ElectricResp (0xE5).
     
-    For all ISDT Air chargers (C4, A4, A8, NP2), each slot holds a single cell.
+    For C4, A4, NP2 Air: Each slot holds a single cell.
     The response contains voltage readings for all slots in the 'cells' list.
     The voltage for a specific slot is cells[channel] where channel is 0-based.
+    
+    For A8 Air: 9-byte response with only input voltage and input current.
     """
-    if len(data) < 12 or data[1] != RESP_ELECTRIC:
+    if len(data) < 3 or data[1] != RESP_ELECTRIC:
         return None
 
     channel = data[2]
+    
+    # Check if this is an A8 Air 9-byte response with channel 8 (all slots)
+    if len(data) == 9 and channel == 8:
+        # A8 Air: 9-byte response for ALL slots
+        input_voltage_mV = int.from_bytes(data[3:5], "little")
+        input_current_mA = int.from_bytes(data[5:9], "little")
+        # Channel 8 means "all slots" - we map it to slot 1 for display
+        return {
+            "channel": 0,  # Map to slot 1
+            "input_voltage_mV": input_voltage_mV,
+            "input_current_mA": input_current_mA,
+            "output_voltage_mV": 0,
+            "charging_current_mA": 0,
+            "voltage_mV": 0,
+        }
+    
+    if len(data) < 12:
+        return None
+    
     is_long = len(data) > 35
 
     if is_long:
@@ -168,10 +313,10 @@ def parse_ir(data: bytes) -> dict | None:
     """
     Parse IRResp (0xFB).
     
-    For A4, A8 and NP2 Air, the response contains IR values for ALL slots.
+    For A4, NP2 Air, the response contains IR values for ALL slots.
     The IR value for a specific slot is ir_values[channel] where channel is 0-based.
-    For C4 Air, the response contains only one value (the requested slot),
-    so ir_values[0] is the correct value.
+    For C4 Air, the response contains only one value (the requested slot).
+    For A8 Air, IR is in the mega-packet, not here.
     """
     if len(data) < 4 or data[1] != RESP_IR:
         return None
@@ -221,6 +366,8 @@ def parse_charger_responses(data: bytes) -> dict:
         return parse_electric(data) or {}
     elif cmd == RESP_IR:
         return parse_ir(data) or {}
+    elif cmd == RESP_A8_TASK:
+        return parse_a8_task_resp(data) or {}
     return {}
 
 

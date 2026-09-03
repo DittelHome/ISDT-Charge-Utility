@@ -13,7 +13,7 @@ DEFAULT_CONFIG = {
     "mac_address": "",
     "bind_uuid": "",          # Persistent Bind UUID (Hex string) – generated once and reused
     "selected_model": "C4 Air",  # Manually selected model: C4 Air, A4 Air, A8 Air, NP2 Air
-    "poll_interval": 3,       # Polling interval in seconds (minimum 3)
+    "poll_interval": 2,       # Polling interval in seconds (minimum 2)
 }
 
 
@@ -27,8 +27,8 @@ def load_config():
                 if "selected_model" not in config:
                     config["selected_model"] = "C4 Air"
                 # Ensure poll_interval exists and is at least 3
-                if "poll_interval" not in config or config.get("poll_interval", 0) < 3:
-                    config["poll_interval"] = 3
+                if "poll_interval" not in config or config.get("poll_interval", 0) < 2:
+                    config["poll_interval"] = 2
                 return config
         except:
             pass
@@ -37,8 +37,8 @@ def load_config():
 
 def save_config(config):
     """Save configuration to JSON file."""
-    # Ensure poll_interval is at least 3
-    if config.get("poll_interval", 0) < 3:
-        config["poll_interval"] = 3
+    # Ensure poll_interval is at least 2
+    if config.get("poll_interval", 0) < 2:
+        config["poll_interval"] = 2
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2)
