@@ -1,5 +1,3 @@
-```markdown
-``` 
 # ISDT Charge Utility
 
 **Cross-platform GUI for ISDT C4 Air, A4 Air, A8 Air and NP2 Air battery chargers on Windows and Linux**
@@ -70,7 +68,7 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 - **Alarm Tone** – Toggle on/off with a single click (🔊/🔇)
 - **Battery‑specific Validation** – Prevents invalid values
 - **Model‑specific Validation** – Prevents unsupported battery types
-- **Persistent Settings** – MAC, device, interval, Bind UUID are saved
+- **Multiple Charger Profiles** MAC, device, interval, Bind UUID are saved for different Charges
 
 ---
 
@@ -82,6 +80,8 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 | ISDT A4 Air | 4     | 1000mA      | ✅ Fully supported    |
 | ISDT A8 Air | 8     | 1000mA      | ✅ Fully supported   |
 | ISDT NP2 Air| 2     | 1500mA      | ❓ Test outstanding (need testers) |
+
+> Note:  The A8 Air tends to drop the connection frequently and may become unresponsive. If the charger stops responding, a power cycle (unplug for 10 seconds) is required to restore operation.
 
 ---
 
@@ -236,14 +236,11 @@ Settings are stored in:
 - **Linux:** `~/.isdt_gui_config.json`
 - **Windows:** `C:\Users\username\.isdt_gui_config.json`
 
-```
-
 ---
 
 ## 🐛 Troubleshooting
 
-### "Device with address ... was not found"
-
+### Device with address ... was not found
 - **DO NOT pair** the device via Windows/Linux Bluetooth settings
 - Close the ISD Link app on your smartphone
 
@@ -251,20 +248,15 @@ Settings are stored in:
 - Make sure the charger is near enough of your PC
 - **Close the ISD Link app** on your smartphone or on a second PC (IMPORTANT!)
 
-### "Device is rebooting sometimes"
+### Device is rebooting sometimes
 - Make sure you have a good USB‑C power adapter. (No multiport USB Chargers)  
-- The ISDT Charger requires 12 V, otherwise it won't charge Li‑ion batteries.
+- Some ISDT Charger requires 12 V, otherwise it won't charge Li‑ion batteries (C4Air).
 
----
-
-## 🔍 Debug Mode
-
-To enable debug mode, set `debug=True` when initializing `ISDTBLE` in `isdt.py`:
-
-```python
-self.device = ISDTBLE(mac, log_callback=self.log_message, debug=True)
-```
-
+### A8 Air is unstable on Windows
+- The A8 Air tends to drop the connection frequently and may become unresponsive. If the charger stops responding, a power cycle (unplug for 10 seconds) is required to restore operation.
+- Use Linux for reliable A8 Air operation. A future firmware update from ISDT might improve Windows compatibility.
+- The app will automatically attempt to reconnect.
+ 
 ---
 
 ## 📝 Developer Notes
@@ -304,5 +296,3 @@ MIT License – see [LICENSE](LICENSE) file.
 ---
 
 **Note:** This is an independent community project and is not affiliated with, endorsed by, or sponsored by ISDT.
-```
-
