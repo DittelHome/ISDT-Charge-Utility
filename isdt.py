@@ -19,6 +19,7 @@ Key features:
 - Adaptive polling (longer intervals when idle)
 - GUI caching (only redraws when data changes)
 - Manual model selection (user chooses model in settings)
+- Multi-device support (save and switch between multiple chargers)
 
 Dependencies:
 - bleak (BLE library)
@@ -38,10 +39,11 @@ import subprocess
 import sys
 import os
 
+
 # ============================================================
 # VERSION
 # ============================================================
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 # ============================================================
 # WINDOWS TASKLEISTE ICON FIX
@@ -54,7 +56,7 @@ if sys.platform == "win32":
         pass
 
 from isdt_ble import ISDTBLE
-from isdt_config import load_config, save_config
+from isdt_config import load_config, save_config, get_active_device, get_device_by_mac, add_device, remove_device, set_active_device, get_device_poll_interval
 from isdt_models import (
     get_model_config,
     get_default_current,
@@ -96,6 +98,7 @@ class ISDTGui:
         self.scanned_devices = []      # List of discovered BLE devices
         self.charge_start_times = {}   # Fallback charge time per slot
         self._last_table_values = []   # GUI caching: last displayed rows
+        self._selected_device_index = None  # Currently selected device in settings
 
         # Widget references for dynamic updates
         self.slot_combo = None
@@ -129,9 +132,10 @@ class ISDTGui:
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
 
-        # Auto-connect if MAC address is saved
-        if self.config.get("mac_address"):
-            mac = self.config.get("mac_address")
+        # Auto-connect if active device exists
+        active = get_active_device(self.config)
+        if active:
+            mac = active.get("mac_address")
             self._kill_blueman_connection(mac)
             self.root.after(500, self.auto_connect)
 
@@ -328,23 +332,15 @@ class ISDTGui:
 
     def _build_settings_tab(self):
         """
-        Builds the 'Settings' tab – two columns side by side.
-
-        Left column: Scan area
-        - Scan button
-        - Listbox with found devices
-        - Select button to store selected device
-
-        Right column: Settings
-        - MAC address
-        - Model selection (dropdown)
-        - Poll interval (minimum 3 seconds)
-        - Version information
+        Builds the 'Settings' tab – with multi-device support.
+        
+        Left column: Scan area + Device list
+        Right column: Settings for selected device
         """
         main_frame = ttk.Frame(self.tab_settings, padding=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # ---- Left column: Scan ----
+        # ---- Left column: Scan + Device List ----
         left_frame = ttk.Frame(main_frame)
         left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
 
@@ -361,21 +357,57 @@ class ISDTGui:
         self.device_listbox.pack(fill=tk.X, pady=5)
         self.device_listbox.bind("<<ListboxSelect>>", self.on_device_select)
 
-        self.save_btn = ttk.Button(left_frame, text="Select",
-                                   command=self.select_device, state=tk.DISABLED)
-        self.save_btn.pack(anchor=tk.W, pady=10)
+        # Buttons for scan results
+        btn_frame = ttk.Frame(left_frame)
+        btn_frame.pack(anchor=tk.W, pady=5)
+        
+        self.add_device_btn = ttk.Button(btn_frame, text="Add Device",
+                                         command=self.add_selected_device, state=tk.DISABLED)
+        self.add_device_btn.pack(side=tk.LEFT, padx=2)
 
-        # ---- Right column: Settings ----
+        ttk.Label(left_frame, text="📱 Saved Devices:", font=("", 10, "bold")).pack(anchor=tk.W, pady=(15, 5))
+
+        # Device list with scrollbar
+        device_frame = ttk.Frame(left_frame)
+        device_frame.pack(fill=tk.X, pady=5)
+        
+        self.saved_devices_listbox = tk.Listbox(device_frame, height=6, width=40)
+        self.saved_devices_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.saved_devices_listbox.bind("<<ListboxSelect>>", self.on_saved_device_select)
+        
+        scrollbar = ttk.Scrollbar(device_frame, orient=tk.VERTICAL, command=self.saved_devices_listbox.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.saved_devices_listbox.config(yscrollcommand=scrollbar.set)
+
+        # Buttons for saved devices
+        saved_btn_frame = ttk.Frame(left_frame)
+        saved_btn_frame.pack(anchor=tk.W, pady=5)
+        
+        self.select_device_btn = ttk.Button(saved_btn_frame, text="Select Device",
+                                            command=self.select_saved_device, state=tk.DISABLED)
+        self.select_device_btn.pack(side=tk.LEFT, padx=2)
+        
+        self.delete_device_btn = ttk.Button(saved_btn_frame, text="Delete Device",
+                                            command=self.delete_saved_device, state=tk.DISABLED)
+        self.delete_device_btn.pack(side=tk.LEFT, padx=2)
+
+        # ---- Right column: Device Settings ----
         right_frame = ttk.Frame(main_frame)
         right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
 
-        ttk.Label(right_frame, text="💾 Settings:", font=("", 10, "bold")).pack(anchor=tk.W, pady=(0, 10))
+        ttk.Label(right_frame, text="💾 Device Settings:", font=("", 10, "bold")).pack(anchor=tk.W, pady=(0, 10))
 
-        ttk.Label(right_frame, text="MAC address:").pack(anchor=tk.W, pady=(5, 0))
-        self.settings_mac = ttk.Entry(right_frame, width=30)
+        # Device name
+        ttk.Label(right_frame, text="Device Name:").pack(anchor=tk.W, pady=(5, 0))
+        self.settings_name = ttk.Entry(right_frame, width=30)
+        self.settings_name.pack(anchor=tk.W, pady=2)
+
+        # MAC address (read-only)
+        ttk.Label(right_frame, text="MAC Address:").pack(anchor=tk.W, pady=(5, 0))
+        self.settings_mac = ttk.Entry(right_frame, width=30, state="readonly")
         self.settings_mac.pack(anchor=tk.W, pady=2)
-        self.settings_mac.insert(0, self.config.get("mac_address", ""))
 
+        # Model selection
         ttk.Label(right_frame, text="Model:").pack(anchor=tk.W, pady=(10, 0))
         self.settings_model = ttk.Combobox(
             right_frame,
@@ -384,19 +416,206 @@ class ISDTGui:
             state="readonly"
         )
         self.settings_model.pack(anchor=tk.W, pady=2)
-        self.settings_model.set(self.config.get("selected_model", "C4 Air"))
 
+        # Poll interval (per device)
         ttk.Label(right_frame, text="Poll interval (s):").pack(anchor=tk.W, pady=(10, 0))
         self.settings_interval = ttk.Entry(right_frame, width=10)
         self.settings_interval.pack(anchor=tk.W, pady=2)
-        self.settings_interval.insert(0, str(self.config.get("poll_interval", 3)))
+        self.settings_interval.insert(0, "2")
 
-        save_settings_btn = ttk.Button(right_frame, text="Save settings", command=self.save_settings)
+        # Save button
+        save_settings_btn = ttk.Button(right_frame, text="Save Device Settings", command=self.save_device_settings)
         save_settings_btn.pack(anchor=tk.W, pady=20)
 
-        # ---- Version information ----
+        # ---- Version ----
         version_label = ttk.Label(right_frame, text=f"Version: {APP_VERSION}", foreground="gray")
         version_label.pack(anchor=tk.W, pady=(20, 0))
+
+        # Populate device lists
+        self._refresh_device_lists()
+
+    def _refresh_device_lists(self):
+        """Refresh the saved devices list and select the active device."""
+        self.saved_devices_listbox.delete(0, tk.END)
+        devices = self.config.get("devices", [])
+        active_idx = self.config.get("active_device")
+        
+        for i, device in enumerate(devices):
+            name = device.get("name", device.get("selected_model", "ISDT"))
+            mac = device.get("mac_address", "")
+            prefix = "▶ " if i == active_idx else "  "
+            display = f"{prefix}{name} ({mac})"
+            self.saved_devices_listbox.insert(tk.END, display)
+        
+        # Show active device settings
+        if active_idx is not None and 0 <= active_idx < len(devices):
+            self._show_device_settings(active_idx)
+            self.select_device_btn.config(state=tk.DISABLED)
+        else:
+            self._clear_device_settings()
+
+    def _show_device_settings(self, index):
+        """Display settings for a specific device."""
+        devices = self.config.get("devices", [])
+        if 0 <= index < len(devices):
+            device = devices[index]
+            self.settings_name.delete(0, tk.END)
+            self.settings_name.insert(0, device.get("name", device.get("selected_model", "")))
+            
+            self.settings_mac.config(state="normal")
+            self.settings_mac.delete(0, tk.END)
+            self.settings_mac.insert(0, device.get("mac_address", ""))
+            self.settings_mac.config(state="readonly")
+            
+            self.settings_model.set(device.get("selected_model", "C4 Air"))
+            self.settings_interval.delete(0, tk.END)
+            self.settings_interval.insert(0, str(device.get("poll_interval", 2)))
+            self._selected_device_index = index
+
+    def _clear_device_settings(self):
+        """Clear the device settings fields."""
+        self.settings_name.delete(0, tk.END)
+        self.settings_mac.config(state="normal")
+        self.settings_mac.delete(0, tk.END)
+        self.settings_mac.config(state="readonly")
+        self.settings_model.set("")
+        self.settings_interval.delete(0, tk.END)
+        self.settings_interval.insert(0, "2")
+        self._selected_device_index = None
+
+    # ------------------------------------------------------------------
+    # Device Management
+    # ------------------------------------------------------------------
+
+    def add_selected_device(self):
+        """Add a scanned device to the saved devices list."""
+        selection = self.device_listbox.curselection()
+        if not selection:
+            return
+        
+        idx = selection[0]
+        device = self.scanned_devices[idx]
+        
+        # Check if device already exists
+        existing = get_device_by_mac(self.config, device.address)
+        if existing:
+            messagebox.showinfo("Info", f"Device {device.name} is already in the list.")
+            return
+        
+        # Add device with default poll interval
+        index = add_device(self.config, device.address, "C4 Air", device.name, 2)
+        save_config(self.config)
+        
+        self.log_message(f"✅ Added: {device.name} ({device.address})")
+        self._refresh_device_lists()
+        
+        # Select the new device
+        self.saved_devices_listbox.selection_clear(0, tk.END)
+        self.saved_devices_listbox.selection_set(index)
+        self.saved_devices_listbox.see(index)
+        self.on_saved_device_select()
+
+    def on_saved_device_select(self, event=None):
+        """Handle selection of a saved device."""
+        selection = self.saved_devices_listbox.curselection()
+        if selection:
+            idx = selection[0]
+            devices = self.config.get("devices", [])
+            if 0 <= idx < len(devices):
+                self._show_device_settings(idx)
+                self.select_device_btn.config(state=tk.NORMAL)
+                self.delete_device_btn.config(state=tk.NORMAL)
+                
+                # Check if this is the active device
+                if self.config.get("active_device") == idx:
+                    self.select_device_btn.config(state=tk.DISABLED, text="✅ Selected")
+                else:
+                    self.select_device_btn.config(state=tk.NORMAL, text="Select Device")
+        else:
+            self.select_device_btn.config(state=tk.DISABLED)
+            self.delete_device_btn.config(state=tk.DISABLED)
+
+    def select_saved_device(self):
+        """Select a saved device as the active device."""
+        selection = self.saved_devices_listbox.curselection()
+        if not selection:
+            return
+        
+        idx = selection[0]
+        devices = self.config.get("devices", [])
+        if 0 <= idx < len(devices):
+            # Disconnect current device if any
+            self.disconnect_device()
+            
+            # Set active device
+            set_active_device(self.config, idx)
+            save_config(self.config)
+            
+            self.log_message(f"📱 Selected device: {devices[idx].get('name', '')} ({devices[idx].get('mac_address', '')})")
+            self._refresh_device_lists()
+            
+            # Auto-connect
+            self.root.after(500, self.auto_connect)
+
+    def delete_saved_device(self):
+        """Delete a saved device from the list."""
+        selection = self.saved_devices_listbox.curselection()
+        if not selection:
+            return
+        
+        idx = selection[0]
+        devices = self.config.get("devices", [])
+        if 0 <= idx < len(devices):
+            device = devices[idx]
+            
+            if not messagebox.askyesno("Delete Device", 
+                                       f"Delete device '{device.get('name', '')}'?\n{device.get('mac_address', '')}"):
+                return
+            
+            # Disconnect if this is the active device
+            if self.config.get("active_device") == idx:
+                self.disconnect_device()
+            
+            remove_device(self.config, idx)
+            save_config(self.config)
+            
+            self.log_message(f"🗑️ Deleted: {device.get('name', '')}")
+            self._refresh_device_lists()
+            self._clear_device_settings()
+
+    def save_device_settings(self):
+        """Save the settings for the selected device."""
+        if self._selected_device_index is None:
+            messagebox.showerror("Error", "No device selected.")
+            return
+        
+        name = self.settings_name.get().strip()
+        selected_model = self.settings_model.get().strip()
+        
+        if not name:
+            messagebox.showerror("Error", "Device name cannot be empty.")
+            return
+        
+        try:
+            interval = int(self.settings_interval.get().strip())
+            if interval < 2:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Error", "Please enter a valid number for the interval (≥ 2 seconds).")
+            return
+        
+        # Update device
+        devices = self.config.get("devices", [])
+        if 0 <= self._selected_device_index < len(devices):
+            devices[self._selected_device_index]["name"] = name
+            devices[self._selected_device_index]["selected_model"] = selected_model
+            devices[self._selected_device_index]["poll_interval"] = interval
+        
+        save_config(self.config)
+        
+        self.log_message(f"✅ Settings saved for {name}")
+        self._refresh_device_lists()
+        messagebox.showinfo("Success", "Device settings saved.")
 
     # ------------------------------------------------------------------
     # Model-specific GUI Updates
@@ -599,21 +818,24 @@ class ISDTGui:
 
     def auto_connect(self):
         """Automatic connection on startup."""
-        mac = self.config.get("mac_address")
-        if mac:
+        active = get_active_device(self.config)
+        if active:
+            mac = active.get("mac_address")
             self.log_message(f"⏳ Auto-connecting to {mac} ...")
-            self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False, config=self.config)
+            self.device = ISDTBLE(active, log_callback=self.log_message, debug=False, config=self.config)
             asyncio.run_coroutine_threadsafe(self._connect_async(), self.loop)
 
     def connect_saved(self):
-        """Manual connection using the saved MAC address (button click)."""
-        mac = self.config.get("mac_address")
-        if not mac:
-            messagebox.showerror("Error", "No MAC address saved.")
+        """Manual connection using the saved device."""
+        active = get_active_device(self.config)
+        if not active:
+            messagebox.showerror("Error", "No device selected. Please select a device in Settings.")
             return
-        self.log_message(f"⏳ Connecting to saved address {mac} ...")
+        
+        mac = active.get("mac_address")
+        self.log_message(f"⏳ Connecting to {mac} ...")
         self._kill_blueman_connection(mac)
-        self.device = ISDTBLE(mac, log_callback=self.log_message, debug=False, config=self.config)
+        self.device = ISDTBLE(active, log_callback=self.log_message, debug=False, config=self.config)
         asyncio.run_coroutine_threadsafe(self._connect_async(), self.loop)
 
     async def _connect_async(self):
@@ -631,10 +853,13 @@ class ISDTGui:
                 # Update BLE config if possible
                 if hasattr(self.device, 'config'):
                     self.device.config = self.config
+
+                # Status-Daten VOR dem Lambda berechnen
+                active = get_active_device(self.config)
+                display_name = (active.get("name") or active.get("selected_model") or "ISDT") if active else "----"
+
                 self.root.after(0, lambda: self.log_message("✅ Connected!"))
-                self.root.after(0, lambda: self.update_status(
-                    f"Connected to {self.config.get('selected_model', 'ISDT')}", "green"
-                ))
+                self.root.after(0, lambda n=display_name: self.update_status(f"Connected to {n}", "green"))
                 self.root.after(0, lambda: self.connect_btn.config(state=tk.DISABLED))
                 self.root.after(0, lambda: self.disconnect_btn.config(state=tk.NORMAL))
                 self.root.after(0, self.update_gui_for_model)
@@ -644,12 +869,8 @@ class ISDTGui:
                 await self._update_alarm_button()
             else:
                 self.root.after(0, lambda: self.log_message("⚠️ Connection failed."))
-                self.root.after(0, lambda: self.log_message("💡 Tip: Please close the ISD Link app on your smartphone."))
-                self.root.after(0, lambda: self.log_message("💡 Tip: Make sure the charger is powered on."))
         except Exception as e:
             self.root.after(0, lambda: self.log_message(f"⚠️ Error: {str(e)}"))
-            self.root.after(0, lambda: self.log_message("💡 Tip: Please close the ISD Link app on your smartphone."))
-            self.root.after(0, lambda: self.log_message("💡 Tip: Make sure the charger is powered on."))
 
     def disconnect_device(self):
         """
@@ -691,8 +912,14 @@ class ISDTGui:
         if self.polling:
             return
         self.polling = True
-        interval = self.config.get("poll_interval", 3)
-        idle_interval = 10
+        
+        # Use device-specific poll interval
+        if hasattr(self.device, 'poll_interval'):
+            interval = self.device.poll_interval
+        else:
+            interval = get_device_poll_interval(self.config)
+        
+        idle_interval = max(interval * 3, 10)  # Idle interval is 3x normal, at least 10s
         self.log_message(f"✅ Polling started (interval: {interval}s, idle: {idle_interval}s).....")
         asyncio.run_coroutine_threadsafe(self._poll_loop(interval, idle_interval), self.loop)
 
@@ -721,10 +948,15 @@ class ISDTGui:
 
             if not still_connected:
                 self.polling = False
-                self.root.after(0, lambda: self.log_message("⚠️ Connection lost – reconnecting..."))
                 if sys.platform == "win32":
-                    self.root.after(5000, self.connect_saved)
+                    self.root.after(0, lambda: self.log_message(
+                        "ℹ️ Connection dropped (typical for A8 under Windows) – reconnecting in 8s..."
+                    ))
+                    self.root.after(8000, self.connect_saved)
                 else:
+                    self.root.after(0, lambda: self.log_message(
+                        "ℹ️ Connection lost – reconnecting..."
+                    ))
                     self.root.after(1000, self.connect_saved)
                 break
 
@@ -945,6 +1177,7 @@ class ISDTGui:
 
         if input_voltage_mV > 0:
             self.root.after(0, lambda: self.update_device_info(input_voltage_mV, input_current_mA))
+
     # ------------------------------------------------------------------
     # Slot Selection
     # ------------------------------------------------------------------
@@ -1126,56 +1359,12 @@ class ISDTGui:
             self.scan_status.config(text=f"{len(self.scanned_devices)} devices found", foreground="green")
             self.log_message(f"✅ {len(self.scanned_devices)} devices found.")
         
-        self.save_btn.config(state=tk.NORMAL if self.scanned_devices else tk.DISABLED)
+        self.add_device_btn.config(state=tk.NORMAL if self.scanned_devices else tk.DISABLED)
         self.scanning = False
 
     def on_device_select(self, event):
         selection = self.device_listbox.curselection()
-        self.save_btn.config(state=tk.NORMAL if selection else tk.DISABLED)
-
-    def select_device(self):
-        """
-        Select a device from the scan list and copy its data to the settings fields.
-        Does NOT save to config - use "Save settings" to persist.
-        """
-        selection = self.device_listbox.curselection()
-        if not selection:
-            return
-        idx = selection[0]
-        device = self.scanned_devices[idx]
-
-        # Copy MAC address to settings field
-        self.settings_mac.delete(0, tk.END)
-        self.settings_mac.insert(0, device.address)
-
-        # Note: Model and poll interval are NOT changed by selecting a device.
-        # The user must change them manually and click "Save settings".
-
-        self.log_message(f"✅ Selected: {device.name} ({device.address})")
-        messagebox.showinfo("Selected", f"Device selected:\n{device.name}\n{device.address}\n\nClick 'Save settings' to store.")
-
-    def save_settings(self):
-        mac = self.settings_mac.get().strip()
-        selected_model = self.settings_model.get().strip()
-        try:
-            interval = int(self.settings_interval.get().strip())
-            if interval < 2:
-                raise ValueError
-        except ValueError:
-            messagebox.showerror("Error", "Please enter a valid number for the interval (≥ 2 seconds).")
-            return
-
-        if not mac:
-            messagebox.showerror("Error", "MAC address cannot be empty.")
-            return
-
-        self.config["mac_address"] = mac
-        self.config["selected_model"] = selected_model
-        self.config["poll_interval"] = interval
-        save_config(self.config)
-
-        self.log_message("✅ Settings saved.")
-        messagebox.showinfo("Success", "Settings saved.")
+        self.add_device_btn.config(state=tk.NORMAL if selection else tk.DISABLED)
 
     # ------------------------------------------------------------------
     # Apply Settings (Send to Charger)
