@@ -79,7 +79,7 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 | Model       | Slots | Max Current | Status                    |
 |-------------|-------|-------------|---------------------------|
 | ISDT C4 Air | 6     | 2000mA      | ✅ Fully supported        |
-| ISDT A4 Air | 4     | 1000mA      | ❓ Test outstanding (need testers) |
+| ISDT A4 Air | 4     | 1000mA      | ✅ Fully supported    |
 | ISDT A8 Air | 8     | 1000mA      | ✅ Fully supported   |
 | ISDT NP2 Air| 2     | 1500mA      | ❓ Test outstanding (need testers) |
 
@@ -224,7 +224,7 @@ python3 isdt.py
 | `isdt_ble.py` | BLE communication (connection, polling, control) |
 | `isdt_protocol.py` | Protocol definitions and parsers |
 | `isdt_config.py` | Settings load/save |
-| `isdt_models.py` | Model definitions (C4/A4/A8 Air) |
+| `isdt_models.py` | Model definitions (C4/A4/A8/NP2 Air) |
 | `icon.png` / `icon.ico` | Application icon |
 | `PROTOCOL.md` | Technical BLE protocol documentation |
 
@@ -236,13 +236,6 @@ Settings are stored in:
 - **Linux:** `~/.isdt_gui_config.json`
 - **Windows:** `C:\Users\username\.isdt_gui_config.json`
 
-```json
-{
-  "mac_address": "50:54:7B:63:4B:A3",
-  "bind_uuid": "ccaadfc455b8499ea807b295c3657250",
-  "selected_model": "C4 Air",
-  "poll_interval": 3
-}
 ```
 
 ---
