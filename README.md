@@ -247,6 +247,7 @@ Settings are stored in:
 ### Connection Timeout
 - Make sure the charger is near enough of your PC
 - **Close the ISD Link app** on your smartphone or on a second PC (IMPORTANT!)
+- If Blootooth communication fails (connection drops, no data received), update your Bluetooth driver (especially Intel adapters) – this often resolves connectivity issues.
 
 ### Device is rebooting sometimes
 - Make sure you have a good USB‑C power adapter. (No multiport USB Chargers)  
