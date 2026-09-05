@@ -122,9 +122,6 @@ class ISDTBLE:
         self._last_bind_response = None
         self._a8_mega_packet_processed = False
 
-        # Cache for A8 Air max_current values
-        self._a8_max_current_cache = {}
-
     def _log(self, msg, force=False):
         if self.debug or force:
             if self.log_callback:
@@ -248,11 +245,11 @@ class ISDTBLE:
     async def connect(self, retries=3):
         """
         Establish BLE connection to the charger.
-        Always connects by MAC address string (no BLEDevice / no discover).
         """
         attempt = 0
-        while attempt <= retries:
+        while attempt < retries:
             client = None
+            connect_task = None
             try:
                 if sys.platform == "win32":
                     client = BleakClient(self.address, timeout=15.0)
@@ -260,12 +257,32 @@ class ISDTBLE:
                     client = BleakClient(self.address, timeout=10.0)
 
                 self.client = client
-                self._log(f"⏳ Connecting... (attempt {attempt+1}/{retries+1})", force=True)
+                self._log(f"⏳ Connecting... (attempt {attempt+1}/{retries})", force=True)
 
-                await asyncio.wait_for(client.connect(), timeout=15.0)
+                # Create a task for the connection attempt
+                async def do_connect():
+                    await client.connect()
+                
+                connect_task = asyncio.create_task(do_connect())
+                
+                # Wait for connection with timeout
+                try:
+                    await asyncio.wait_for(asyncio.shield(connect_task), timeout=20.0)
+                except asyncio.TimeoutError:
+                    self._log(f"⏳ Connect timeout (attempt {attempt+1})", force=True)
+                    # Cancel the task if it's still running
+                    if not connect_task.done():
+                        connect_task.cancel()
+                        try:
+                            await connect_task
+                        except asyncio.CancelledError:
+                            pass
+                    raise  # Re-raise to be caught by outer except
 
                 self.connected = True
                 self._log("✅ BLE connected.", force=True)
+
+                # Display MTU size
                 try:
                     self._log(f"📡 MTU: {client.mtu_size}", force=True)
                 except Exception:
@@ -277,7 +294,9 @@ class ISDTBLE:
                 await client.start_notify(CHAR_UUID_AF02, self.notification_handler)
                 self._log("✅ Notification handlers registered.", force=True)
 
+                # A8 Air on Windows needs extra settle time
                 if sys.platform == "win32" and self.is_a8:
+                    self._log("🔄 Windows: Extra settle time for A8 Air...", force=True)
                     await asyncio.sleep(1.5)
                 else:
                     await asyncio.sleep(POST_NOTIFICATION_SETUP)
@@ -292,11 +311,39 @@ class ISDTBLE:
 
                 return True
 
+            except asyncio.TimeoutError:
+                self._log(f"⏳ Connection timeout (attempt {attempt+1}/{retries})", force=True)
+                if connect_task and not connect_task.done():
+                    connect_task.cancel()
+                    try:
+                        await connect_task
+                    except asyncio.CancelledError:
+                        pass
+                if client is not None:
+                    try:
+                        await asyncio.wait_for(client.disconnect(), timeout=2.0)
+                    except Exception:
+                        pass
+                self.client = None
+                self.connected = False
+                attempt += 1
+                if attempt < retries:
+                    wait = 4.0 if sys.platform == "win32" else 2.0
+                    self._log(f"⏳ Waiting {wait:.0f}s before retry...", force=True)
+                    await asyncio.sleep(wait)
+
             except Exception as e:
                 error_msg = str(e).strip()
                 if not error_msg:
                     error_msg = f"{type(e).__name__} (empty message) {e!r}"
                 self._log(f"⚠️ Connection error: {error_msg}", force=True)
+
+                if connect_task and not connect_task.done():
+                    connect_task.cancel()
+                    try:
+                        await connect_task
+                    except asyncio.CancelledError:
+                        pass
 
                 if client is not None:
                     try:
@@ -314,25 +361,17 @@ class ISDTBLE:
 
                 self.client = None
                 self.connected = False
-
-                err_l = error_msg.lower()
-                if "geschlossen" in err_l or "closed" in err_l or "-2147483629" in error_msg:
-                    wait = 8.0
-                elif sys.platform == "win32":
-                    wait = 4.0
-                else:
-                    wait = 2.0
-
-                self._log(f"⏳ Waiting {wait:.0f}s before retry...", force=True)
-                await asyncio.sleep(wait)
                 attempt += 1
+                if attempt < retries:
+                    wait = 4.0 if sys.platform == "win32" else 2.0
+                    self._log(f"⏳ Waiting {wait:.0f}s before retry...", force=True)
+                    await asyncio.sleep(wait)
 
         self._log("⚠️ All connection attempts failed.", force=True)
         if sys.platform == "win32":
-            self._log(
-                "💡 Tip: Power-cycle the charger (unplug 15s), close ISD Link, then try again.",
-                force=True
-            )
+            self._log("💡 Tip: Power-cycle the charger (unplug 15s), then try again.", force=True)
+            self._log("💡 Tip: Close the ISD Link app on your smartphone.", force=True)
+            self._log("💡 Tip: Update your Bluetooth driver (especially Intel adapters).", force=True)
         else:
             self._log("💡 Tip: Please close the ISD Link app on your smartphone.", force=True)
             self._log("💡 Tip: Make sure the charger is powered on.", force=True)
