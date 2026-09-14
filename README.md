@@ -277,6 +277,10 @@ Settings are stored in:
 
 The BLE protocol is based on the documentation from the [Home Assistant Integration](https://github.com/mtheli/isdt_air_ble) for reading, and reverse‑engineered from the ISD Link Android app for writing. See [Protocol description](https://github.com/DittelHome/ISDT-Charge-Utility/blob/main/PROTOCOL.md)
 
+## Known Issues
+
+- **ISDT A8 Air on Windows:** The A8 Air does not operate stably under Windows. This appears to be related to BLE stack limitations or driver issues with the higher slot count (8 slots) and increased data throughput. Linux uses a different Bluetooth stack (BlueZ) which handles the A8 Air correctly.
+
 ## 💻 Platform Support
 
 | Platform | Support | Notes |
@@ -292,6 +296,7 @@ The program works natively on both Linux and Windows.
 ## 📜 License
 
 MIT License – see [LICENSE](file:///E:/Werkstatt-Laptop/Software/Messgeräte/ISDT_Charger/GIT/LICENSE) file.
+
 
 ## 🙏 Acknowledgments
 
