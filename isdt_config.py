@@ -2,7 +2,6 @@
 """
 ISDT Config – Loads and saves user settings in a JSON file.
 
-Author: Klaus Voigt
 """
 import json
 import os
@@ -16,7 +15,7 @@ DEFAULT_CONFIG = {
     "heartbeat_interval": 10,
     "debug_log_folder": "",
 }
-
+from isdt_models import get_poll_interval
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
@@ -62,16 +61,21 @@ def save_config(config):
         json.dump(config, f, indent=2)
 
 
-def add_device(config, mac_address, selected_model, name=None, poll_interval=2):
+def add_device(config, mac_address, selected_model, name=None, poll_interval=None):
     devices = config.get("devices", [])
     for i, device in enumerate(devices):
         if device.get("mac_address") == mac_address:
             devices[i]["selected_model"] = selected_model
             if name:
                 devices[i]["name"] = name
-            devices[i]["poll_interval"] = poll_interval
+            if poll_interval is not None:
+                devices[i]["poll_interval"] = poll_interval
             config["devices"] = devices
             return i
+
+    if poll_interval is None:
+        poll_interval = get_poll_interval(selected_model)
+
     new_device = {
         "mac_address": mac_address,
         "selected_model": selected_model,

@@ -2,7 +2,6 @@
 """
 ISDT BLE – Encapsulates all Bluetooth communication with the charger.
 
-Author: Klaus Voigt
 """
 
 import sys
@@ -25,7 +24,7 @@ from isdt_protocol import (
     parse_alarm_tone, parse_a8_workstate_mega, parse_a8_task_resp,
 )
 
-from isdt_models import get_model_config
+from isdt_models import get_model_config, get_poll_interval, is_poll_interval_fixed
 
 
 # ==================================================================
@@ -36,21 +35,21 @@ from isdt_models import get_model_config
 
 # --- Connection ---
 CONNECT_RETRIES = 2               # how many connect attempts
-CONNECT_TIMEOUT_S = 20.0          # hard timeout for BleakClient.connect()
+CONNECT_TIMEOUT_S = 15.0          # hard timeout for BleakClient.connect()
 POST_CONNECT_SETTLE = 1.0         # wait after BLE connect
 POST_NOTIFICATION_SETUP = 0.5     # wait after notify handlers are set up
-BIND_TIMEOUT = 3.0                # bind handshake response timeout
 HW_INFO_TIMEOUT = 3.0             # hardware-info response timeout
 
 # --- Polling ---
-COMMAND_INTERVAL = 1.0            # pause between two GATT writes in one poll
-                                  # (A8 needs this – it gets overwhelmed otherwise)
-RESPONSE_TIMEOUT = 5.0            # wait for any single response
+COMMAND_INTERVAL = 0.1            # pause between two GATT writes in one poll
+RESPONSE_TIMEOUT = 2.0            # wait for any single response
 MAX_POLL_FAILURES = 3             # disconnect after this many empty polls
+RECONNECT_DELAY_S = 15            # fixed delay before reconnect
+START_POLL_DELAY_MS = 500         # delay between connect and first poll
 
-# --- Reconnect ---
-RECONNECT_DELAY_S = 15            # fixed delay before reconnect (no backoff)
-START_POLL_DELAY_MS = 1000        # delay between connect and first poll
+# --- A8-spezifisch ---
+A8_WORKSTATE_TIMEOUT = 15.0       # A8 needs ~10 s for Mega-Paket
+
 
 
 # Human-readable command names for the debug traffic log
@@ -89,11 +88,17 @@ class ISDTBLE:
         self.supports_alarm = self.model_config.get("supports_alarm", True)
         self.is_a8 = (self.model_key == "A8 Air")
 
-        self.poll_interval = device_info.get("poll_interval", 10)
+        if is_poll_interval_fixed(self.model_key):
+            self.poll_interval = get_poll_interval(self.model_key)
+        else:
+            self.poll_interval = device_info.get(
+                "poll_interval", get_poll_interval(self.model_key)
+            )
 
         self.debug_traffic = False
         self.debug_log_file = None
         self._alarm_tone_state = False
+        self.hw_info = {}
 
     # ------------------------------------------------------------------
     # Logging
@@ -161,12 +166,25 @@ class ISDTBLE:
             except asyncio.TimeoutError:
                 continue
         return None
+        
+        
+    async def _wait_for_hw_info(self, timeout):
+        """HW-Info-Antwort: 0xE1 an Position 0 (nicht [0x31, 0xE1])."""
+        start = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start < timeout:
+            try:
+                resp = await asyncio.wait_for(self.notification_queue.get(), timeout=0.2)
+                if len(resp) >= 13 and resp[0] == CMD_HW_INFO_RESP:
+                    return resp
+            except asyncio.TimeoutError:
+                continue
+        return None
 
     # ------------------------------------------------------------------
     # Connection setup
     # ------------------------------------------------------------------
 
-    async def _initialize(self):
+    async def _initialize(self) -> bool:
         self._log("✅ Initializing...")
 
         # Hardware info
@@ -174,9 +192,27 @@ class ISDTBLE:
             hw_cmd = struct.pack("<B", CMD_HW_INFO_REQ)
             await self.client.write_gatt_char(CHAR_UUID_AF02, hw_cmd)
             self._log_traffic("📤 WRITE", hw_cmd, "AF02")
-            await asyncio.sleep(0.5)
         except Exception as e:
-            self._log(f"⚠️ HW-Info error: {e}")
+            self._log(f"⚠️ HW-Info write failed: {e}")
+            return False
+
+        hw_resp = await self._wait_for_hw_info(HW_INFO_TIMEOUT)
+
+        if not hw_resp:
+            self._log("⚠️ HW-Info timeout – aborting init")
+            return False
+
+        parsed = parse_hardware_info(hw_resp)
+        if not parsed:
+            self._log("⚠️ HW-Info parse failed – aborting init")
+            return False
+
+        self.hw_info = parsed
+        self._log(
+            f"ℹ️ HW v{parsed['hw_version']} | "
+            f"FW v{parsed['fw_version']} | "
+            f"S/N {parsed['serial']}"
+        )
 
         self._log("✅ Bind handshake...")
 
@@ -192,15 +228,16 @@ class ISDTBLE:
             bind_uuid = uuid.uuid4().bytes
             self.device_info["bind_uuid"] = bind_uuid.hex()
 
-        # Send BindReq – no waiting, no queue check
+        # Send BindReq
         try:
             cmd = struct.pack("<B", CMD_BIND_REQ) + bind_uuid + b"\x00\x00"
             await self.client.write_gatt_char(CHAR_UUID_AF02, cmd)
             self._log_traffic("📤 WRITE", cmd, "AF02")
         except Exception as e:
             self._log(f"⚠️ Bind write failed: {e}")
+            return False
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.2)
 
         # Start data stream
         try:
@@ -208,9 +245,12 @@ class ISDTBLE:
             await self.client.write_gatt_char(CHAR_UUID_AF02, stream_cmd)
             self._log_traffic("📤 WRITE", stream_cmd, "AF02")
         except Exception as e:
-            self._log(f"⚠️ Start data stream error: {e}")
+            self._log(f"⚠️ Start data stream failed: {e}")
+            return False
 
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.2)
+
+        return True
 
     async def connect(self, retries=CONNECT_RETRIES):
         attempt = 0
@@ -231,7 +271,20 @@ class ISDTBLE:
                 self._log("✅ Notification handlers registered.")
                 await asyncio.sleep(POST_NOTIFICATION_SETUP)
 
-                await self._initialize()
+                ok = await self._initialize()
+                if not ok:
+                    self._log("⚠️ Initialization failed – aborting attempt.")
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                    self.client = None
+                    self.connected = False
+                    attempt += 1
+                    if attempt < retries:
+                        await asyncio.sleep(4.0)
+                    continue
+
                 self._log("✅ Initialization complete.")
 
                 if self.supports_alarm:
@@ -293,7 +346,7 @@ class ISDTBLE:
             self._log(f"⚠️ A8 write failed: {e}")
             return False
 
-        resp = await self._wait_for_opcode(RESP_WORKSTATE, RESPONSE_TIMEOUT)
+        resp = await self._wait_for_opcode(RESP_WORKSTATE, A8_WORKSTATE_TIMEOUT)
         if not resp or len(resp) < 200:
             self._log("⚠️ No mega-packet received")
             return False

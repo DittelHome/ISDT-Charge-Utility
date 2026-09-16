@@ -2,7 +2,6 @@
 """
 ISDT Model Definitions – Central configuration for supported models.
 
-Author: Klaus Voigt
 """
 
 from typing import Dict, Any
@@ -19,6 +18,7 @@ ISDT_MODELS = {
         "supports_alarm": True,
         "default_current_mA": 300,
         "default_capacity_mAh": 2500,
+        "poll_interval": 4,
     },
     "A4 Air": {
         "slots": 4,
@@ -28,6 +28,7 @@ ISDT_MODELS = {
         "supports_alarm": False,
         "default_current_mA": 300,
         "default_capacity_mAh": 2500,
+        "poll_interval": 4,
     },
     "A8 Air": {
         "slots": 8,
@@ -37,6 +38,7 @@ ISDT_MODELS = {
         "supports_alarm": False,
         "default_current_mA": 300,
         "default_capacity_mAh": 2500,
+        "poll_interval": 10,
     },
 }
 
@@ -112,3 +114,11 @@ def get_model_config(model_key: str) -> Dict[str, Any]:
 def get_default_current(model_key: str) -> int:
     config = get_model_config(model_key)
     return config.get("default_current_mA", 300)
+    
+def get_poll_interval(model_key: str) -> int:
+    config = get_model_config(model_key)
+    return config.get("poll_interval", 10)
+
+def is_poll_interval_fixed(model_key: str) -> bool:
+    """True, wenn der Poll-Intervall für dieses Modell nicht änderbar ist."""
+    return model_key == "A8 Air"

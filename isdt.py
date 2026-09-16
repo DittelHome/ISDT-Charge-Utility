@@ -6,7 +6,6 @@ ISDT Charger – Monitor & Control
 
 Main GUI application for ISDT C4 / A4 / A8 Air chargers.
 
-Author: Klaus Voigt
 License: MIT
 """
 
@@ -23,7 +22,7 @@ import threading
 import time
 import os
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 if sys.platform == "win32":
     try:
@@ -44,7 +43,8 @@ from isdt_config import (
     get_debug_log_folder,
 )
 from isdt_models import (
-    get_default_current, BATTERY_LIMITS,
+    get_default_current, get_poll_interval, is_poll_interval_fixed, 
+    BATTERY_LIMITS,
     CURRENT_MIN_MA, CURRENT_MAX_MA, BATTERY_TYPE_STR_TO_INT,
 )
 
@@ -85,6 +85,7 @@ class ISDTGui:
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        self._heartbeat_timer_id = None    
         self.tab_device = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_device, text="Device")
         self._build_device_tab()
@@ -103,7 +104,7 @@ class ISDTGui:
 
     def _on_closing(self):
         self.polling = False
-        self._heartbeat_interval_min = 0
+        self._stop_heartbeat()
 
         if self._debug_log_file:
             try:
@@ -440,13 +441,15 @@ class ISDTGui:
 
             self.settings_model.set(model)
 
-            # A8 Air: poll interval is fixed at 10s, greyed out
+            # A8 Air: poll interval is fixed, greyed out
             self.settings_interval.delete(0, tk.END)
-            if model == "A8 Air":
-                self.settings_interval.insert(0, "10")
+            if is_poll_interval_fixed(model):
+                self.settings_interval.insert(0, str(get_poll_interval(model)))
                 self.settings_interval.config(state="readonly", style="Readonly.TEntry")
             else:
-                self.settings_interval.insert(0, str(device.get("poll_interval", 10)))
+                self.settings_interval.insert(
+                    0, str(device.get("poll_interval", get_poll_interval(model)))
+                )
                 self.settings_interval.config(state="normal", style="TEntry")
 
             self.settings_heartbeat.delete(0, tk.END)
@@ -471,11 +474,11 @@ class ISDTGui:
 
     def _on_model_changed(self, event=None):
         """Called when the model dropdown is changed. Locks the poll interval
-        for A8 Air (fixed at 10 s, greyed out), unlocks it for other models."""
+        for models with a fixed interval (A8 Air), unlocks it for others."""
         model = self.settings_model.get().strip()
-        if model == "A8 Air":
+        if is_poll_interval_fixed(model):
             self.settings_interval.delete(0, tk.END)
-            self.settings_interval.insert(0, "10")
+            self.settings_interval.insert(0, str(get_poll_interval(model)))
             self.settings_interval.config(state="readonly", style="Readonly.TEntry")
         else:
             self.settings_interval.config(state="normal", style="TEntry")
@@ -489,7 +492,7 @@ class ISDTGui:
         if get_device_by_mac(self.config, device.address):
             messagebox.showinfo("Info", f"Device {device.name} is already in the list.")
             return
-        index = add_device(self.config, device.address, "C4 Air", device.name, 10)
+        index = add_device(self.config, device.address, "C4 Air", device.name)
         save_config(self.config)
         self.log_message(f"✅ Added: {device.name} ({device.address})")
         self._refresh_device_lists()
@@ -556,17 +559,18 @@ class ISDTGui:
         if self._selected_device_index is None:
             messagebox.showerror("Error", "No device selected.")
             return
+
         name = self.settings_name.get().strip()
         selected_model = self.settings_model.get().strip()
+
         if not name:
             messagebox.showerror("Error", "Device name cannot be empty.")
             return
 
-        # A8 Air has a fixed poll interval of 10s – no user override.
-        if selected_model == "A8 Air":
-            interval = 10
+        if is_poll_interval_fixed(selected_model):
+            interval = get_poll_interval(selected_model)
             self.settings_interval.delete(0, tk.END)
-            self.settings_interval.insert(0, "10")
+            self.settings_interval.insert(0, str(interval))
             self.settings_interval.config(state="readonly", style="Readonly.TEntry")
         else:
             try:
@@ -584,11 +588,13 @@ class ISDTGui:
         except ValueError:
             messagebox.showerror("Error", "Invalid heartbeat interval (≥ 1 minute).")
             return
+
         devices = self.config.get("devices", [])
         if 0 <= self._selected_device_index < len(devices):
             devices[self._selected_device_index]["name"] = name
             devices[self._selected_device_index]["selected_model"] = selected_model
             devices[self._selected_device_index]["poll_interval"] = interval
+
         self.config["heartbeat_interval"] = heartbeat
         self.config["debug_log_folder"] = self.settings_debug_folder.get().strip()
         save_config(self.config)
@@ -727,6 +733,9 @@ class ISDTGui:
                 self.root.after(0, lambda: self.connect_btn.config(state=tk.DISABLED))
                 self.root.after(0, lambda: self.disconnect_btn.config(state=tk.NORMAL))
                 self.root.after(0, self.update_gui_for_model)
+                
+                self._connect_start_time = time.time()
+                self._start_heartbeat() 
 
                 # A8Task once after connect (no retry)
                 if self.device.is_a8:
@@ -769,7 +778,7 @@ class ISDTGui:
             asyncio.run_coroutine_threadsafe(self.device.disconnect(), self.loop)
             time.sleep(0.1)
             self.device = None
-        self._heartbeat_interval_min = 0
+        self._stop_heartbeat()
         self.connect_btn.config(state=tk.NORMAL)
         self.disconnect_btn.config(state=tk.DISABLED)
         self.update_status("Disconnected", "gray")
@@ -791,9 +800,7 @@ class ISDTGui:
         interval = self.device.poll_interval
         self.log_message(f"✅ Polling started (interval: {interval}s)")
         asyncio.run_coroutine_threadsafe(self._poll_loop(interval), self.loop)
-        self._connect_start_time = time.time()
-        self._heartbeat_interval_min = self.config.get("heartbeat_interval", 10)
-        self.root.after(self._heartbeat_interval_min * 60000, self._heartbeat_loop)
+
 
     async def _poll_loop(self, interval):
         if not self.device or not self.device.connected:
@@ -807,9 +814,9 @@ class ISDTGui:
 
                 if not self.device.connected:
                     self.polling = False
-                    self._heartbeat_interval_min = 0
-                    self.log_message("⚠️ Link lost – reconnecting now")
-                    self.root.after(0, self.connect_saved)
+                    self._stop_heartbeat()
+                    self.log_message(f"⚠️ Link lost – reconnecting in {RECONNECT_DELAY_S}s")
+                    self.root.after(RECONNECT_DELAY_S * 1000, self.connect_saved)
                     break
 
                 if ok:
@@ -818,26 +825,40 @@ class ISDTGui:
                     failures += 1
                     if failures >= MAX_POLL_FAILURES:
                         self.polling = False
-                        self._heartbeat_interval_min = 0
-                        self.log_message(
-                            f"⚠️ {MAX_POLL_FAILURES} empty polls – reconnecting now"
-                        )
-                        self.root.after(0, self.connect_saved)
+                        self._stop_heartbeat()
+                        self.log_message(f"⚠️ {MAX_POLL_FAILURES} empty polls – reconnecting in {RECONNECT_DELAY_S}s")
+                        self.root.after(RECONNECT_DELAY_S * 1000, self.connect_saved)
                         break
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
             raise
         finally:
             self.polling = False
+            self._stop_heartbeat()
             self.log_message("✅ Polling stopped")
 
+    def _start_heartbeat(self):
+        self._stop_heartbeat()
+        interval = self.config.get("heartbeat_interval", 10)
+        if interval > 0:
+            self._heartbeat_timer_id = self.root.after(
+                interval * 60000, self._heartbeat_loop
+            )
+
+    def _stop_heartbeat(self):
+        if self._heartbeat_timer_id is not None:
+            try:
+                self.root.after_cancel(self._heartbeat_timer_id)
+            except Exception:
+                pass
+            self._heartbeat_timer_id = None
+
     def _heartbeat_loop(self):
-        if self._heartbeat_interval_min <= 0:
-            return
-        if not self.polling or not self.device or not self.device.connected:
+        self._heartbeat_timer_id = None
+        if not self.device or not self.device.connected:
             return
         self._log_heartbeat()
-        self.root.after(self._heartbeat_interval_min * 60000, self._heartbeat_loop)
+        self._start_heartbeat()
 
     def _log_heartbeat(self):
         if not self.device or not self.device.connected:
@@ -849,9 +870,10 @@ class ISDTGui:
             work = self.device.latest_data.get(f"slot{slot}_workstate", {})
             if work.get("status_str", "idle") not in ("idle", "empty", "done", "error"):
                 active_slots += 1
+        minutes = int(uptime // 60)
         self.log_message(
-            f"💓 Heartbeat: connected, {active_slots}/{self.device.num_slots} slots active, "
-            f"connect_time {self._format_time(uptime)}"
+            f"💓 Heartbeat: {active_slots}/{self.device.num_slots} slots active, "
+            f"Connection time {minutes} min"
         )
 
     def _format_time(self, seconds):
@@ -1170,8 +1192,6 @@ class ISDTGui:
                 self.root.after(2000, self._refresh_a8_task)
 
         except ValueError as e:
-            messagebox.showerror("Input error", str(e))
-        except Exception as e:
             messagebox.showerror("Input error", str(e))
 
     def _refresh_a8_task(self):

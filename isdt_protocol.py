@@ -2,7 +2,6 @@
 """
 ISDT BLE Protocol – BLE command constants and response parsers.
 
-Author: Klaus Voigt
 """
 
 # ------------------------------------------------------------------
