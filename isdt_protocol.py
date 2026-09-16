@@ -2,6 +2,12 @@
 """
 ISDT BLE Protocol – BLE command constants and response parsers.
 
+The protocol has two characteristics:
+  AF01 – data polling and control
+  AF02 – connection setup (hardware info, bind handshake, data stream)
+
+Responses on AF01 start with 0x31 followed by the opcode. AF02 responses
+(HW info, bind) start directly with their opcode.
 """
 
 # ------------------------------------------------------------------
@@ -11,7 +17,7 @@ CHAR_UUID_AF01 = "0000af01-0000-1000-8000-00805f9b34fb"
 CHAR_UUID_AF02 = "0000af02-0000-1000-8000-00805f9b34fb"
 
 # ------------------------------------------------------------------
-# AF02 Commands (connection setup)
+# AF02 commands (connection setup)
 # ------------------------------------------------------------------
 CMD_HW_INFO_REQ = 0xE0
 CMD_HW_INFO_RESP = 0xE1
@@ -19,7 +25,7 @@ CMD_BIND_REQ = 0x18
 CMD_BIND_RESP = 0x19
 
 # ------------------------------------------------------------------
-# AF01 Commands (data polling and control)
+# AF01 commands (data polling and control)
 # ------------------------------------------------------------------
 CMD_WORKSTATE = bytes([0x13, 0xE6])
 CMD_ELECTRIC = bytes([0x12, 0xE4])
@@ -63,6 +69,7 @@ BATTERY_TYPE_MAP = {
 # ------------------------------------------------------------------
 
 def parse_hardware_info(data: bytes) -> dict | None:
+    """Parse a hardware-info response (0xE1 at position 0)."""
     if len(data) < 13 or data[0] != CMD_HW_INFO_RESP:
         return None
     return {
@@ -73,6 +80,22 @@ def parse_hardware_info(data: bytes) -> dict | None:
 
 
 def parse_workstate(data: bytes) -> dict | None:
+    """Parse a single-slot WorkState response (C4 / A4).
+
+    Layout (little-endian):
+      [0]    0x31 prefix
+      [1]    0xE7
+      [2]    channel
+      [3]    status
+      [4]    capacity %
+      [5:9]  capacity mAh
+      [9:13] energy mWh
+      [13:17] work period ms
+      [17]   battery type
+      [20:22] full charged voltage mV
+      [22:26] max current mA
+      [32:36] max output power mW
+    """
     if len(data) < 36 or data[1] != RESP_WORKSTATE:
         return None
 
@@ -94,6 +117,26 @@ def parse_workstate(data: bytes) -> dict | None:
 
 
 def parse_a8_workstate_mega(data: bytes) -> dict | None:
+    """Parse the A8 mega packet (all 8 slots in a single response).
+
+    Layout:
+      [0]    0x31 prefix
+      [1]    0xE7
+      [2]    number of channels (1..8)
+      [3:]   per-channel blocks of 25 bytes each
+
+    Per-channel block:
+      [0]     status
+      [1]     capacity %
+      [2:6]   capacity mAh
+      [6:10]  energy mWh
+      [10:14] work period ms
+      [14]    battery type
+      [15:19] work current mA
+      [19:21] voltage mV
+      [21:23] IR in 0.01 mΩ units
+      [23:25] error code
+    """
     if len(data) < 3 or data[1] != RESP_WORKSTATE:
         return None
     total_channels = data[2]
@@ -102,6 +145,7 @@ def parse_a8_workstate_mega(data: bytes) -> dict | None:
     # Minimum length: 3-byte header + total_channels * 25 bytes
     if len(data) < 3 + total_channels * 25:
         return None
+
     result = {}
     offset = 3
     for channel in range(total_channels):
@@ -115,6 +159,7 @@ def parse_a8_workstate_mega(data: bytes) -> dict | None:
         battery_type = data[offset + 14]
         work_current_mA = int.from_bytes(data[offset + 15:offset + 19], "little")
         voltage_mV = int.from_bytes(data[offset + 19:offset + 21], "little")
+        # A8 IR is transmitted in 0.01 mΩ units -> divide by 100
         ir_mohm = int.from_bytes(data[offset + 21:offset + 23], "little") / 100.0
         error_code = int.from_bytes(data[offset + 23:offset + 25], "little")
         slot_data = {
@@ -140,6 +185,21 @@ def parse_a8_workstate_mega(data: bytes) -> dict | None:
 
 
 def parse_a8_task_resp(data: bytes) -> dict | None:
+    """Parse an A8 task response (per-slot charge settings).
+
+    Layout:
+      [0]    0x31 prefix
+      [1]    0xED
+      [2]    number of channels
+      [3:]   per-channel blocks of 12 bytes each
+
+    Per-channel block:
+      [0]    task type
+      [1]    battery type
+      [2:6]  max current mA
+      [6:8]  voltage mV
+      [8:12] capacity limit mAh
+    """
     if len(data) < 3 or data[1] != RESP_A8_TASK:
         return None
     total_channels = data[2]
@@ -168,9 +228,22 @@ def parse_a8_task_resp(data: bytes) -> dict | None:
 
 
 def parse_electric(data: bytes) -> dict | None:
+    """Parse an Electric response (input / output voltage and current).
+
+    There are two layouts depending on total length:
+      short (<= 35 bytes): 2-byte input voltage, 4-byte input current,
+                           2-byte output voltage, 4-byte charging current
+      long  (> 35 bytes):  4-byte input voltage, 4-byte input current,
+                           4-byte output voltage, 4-byte charging current
+    Followed by up to 8/16 cell voltages (2 bytes each).
+
+    Special case: length 9 and channel 8 -> dedicated input-supply packet.
+    """
     if len(data) < 3 or data[1] != RESP_ELECTRIC:
         return None
     channel = data[2]
+
+    # Dedicated input-supply packet (channel 8)
     if len(data) == 9 and channel == 8:
         input_voltage_mV = int.from_bytes(data[3:5], "little")
         input_current_mA = int.from_bytes(data[5:9], "little")
@@ -182,8 +255,10 @@ def parse_electric(data: bytes) -> dict | None:
             "charging_current_mA": 0,
             "voltage_mV": 0,
         }
+
     if len(data) < 12:
         return None
+
     is_long = len(data) > 35
     if is_long:
         input_voltage_mV = int.from_bytes(data[3:7], "little")
@@ -211,6 +286,7 @@ def parse_electric(data: bytes) -> dict | None:
                 break
             cells.append(cell_mV)
             offset += 2
+
     result = {
         "channel": channel,
         "input_voltage_mV": input_voltage_mV,
@@ -229,7 +305,13 @@ def parse_electric(data: bytes) -> dict | None:
     return result
 
 
-def parse_ir(data: bytes) -> dict | None:
+def parse_ir(data: bytes, divisor: float = 10.0) -> dict | None:
+    """Parse an IR response.
+
+    The raw value is divided by `divisor` to get mΩ.
+    C4 uses divisor 10.0, A4 uses divisor 100.0.
+    Parsing stops at the first zero or implausible value (>= 10000).
+    """
     if len(data) < 4 or data[1] != RESP_IR:
         return None
     channel = data[2]
@@ -239,7 +321,7 @@ def parse_ir(data: bytes) -> dict | None:
         raw = int.from_bytes(data[offset:offset + 2], "little")
         if raw == 0 or raw >= 10000:
             break
-        ir_values.append(raw / 10.0)
+        ir_values.append(raw / divisor)
         offset += 2
     if channel < len(ir_values):
         ir_total = ir_values[channel]
@@ -253,12 +335,18 @@ def parse_ir(data: bytes) -> dict | None:
 
 
 def parse_alarm_tone(data: bytes) -> bool | None:
+    """Parse an alarm-tone state response. True = tone enabled."""
     if len(data) < 3 or data[1] != CMD_ALARM_TONE_RESP:
         return None
     return data[2] != 0
 
 
-def parse_charger_responses(data: bytes) -> dict:
+def parse_charger_responses(data: bytes, ir_divisor: float = 10.0) -> dict:
+    """Dispatch a response to the correct parser.
+
+    `ir_divisor` is only used for IR responses and is passed through to
+    `parse_ir`. Default 10.0 keeps backward compatibility with C4.
+    """
     if len(data) < 2:
         return {}
     cmd = data[1]
@@ -267,11 +355,12 @@ def parse_charger_responses(data: bytes) -> dict:
     elif cmd == RESP_ELECTRIC:
         return parse_electric(data) or {}
     elif cmd == RESP_IR:
-        return parse_ir(data) or {}
+        return parse_ir(data, divisor=ir_divisor) or {}
     elif cmd == RESP_A8_TASK:
         return parse_a8_task_resp(data) or {}
     return {}
 
 
 def build_command(cmd_bytes: bytes, slot: int) -> bytes:
+    """Build a command for a 1-based slot number (0-based channel)."""
     return cmd_bytes + bytes([slot - 1])

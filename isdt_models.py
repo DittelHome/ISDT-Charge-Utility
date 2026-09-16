@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-ISDT Model Definitions – Central configuration for supported models.
+ISDT Model Definitions – Central configuration for supported charger models.
 
+All model-specific parameters live here: slot count, current limits, supported
+battery types, poll interval bounds, IR scaling and slot ordering.
 """
 
 from typing import Dict, Any
+
 
 # ------------------------------------------------------------------
 # Model definitions
@@ -19,6 +22,12 @@ ISDT_MODELS = {
         "default_current_mA": 300,
         "default_capacity_mAh": 2500,
         "poll_interval": 4,
+        "min_poll_interval": 2,
+        "max_poll_interval": 60,
+        # IR raw value is transmitted in 0.1 mΩ units -> divide by 10
+        "ir_divisor": 10.0,
+        # C4 slot order matches the GUI slot order
+        "slot_order_reversed": False,
     },
     "A4 Air": {
         "slots": 4,
@@ -28,7 +37,13 @@ ISDT_MODELS = {
         "supports_alarm": False,
         "default_current_mA": 300,
         "default_capacity_mAh": 2500,
-        "poll_interval": 4,
+        "poll_interval": 10,
+        "min_poll_interval": 8,
+        "max_poll_interval": 60,
+        # IR raw value is transmitted in 0.01 mΩ units -> divide by 100
+        "ir_divisor": 100.0,
+        # A4 reports slots in reverse order (physical slot 1 = protocol channel 3)
+        "slot_order_reversed": True,
     },
     "A8 Air": {
         "slots": 8,
@@ -39,8 +54,14 @@ ISDT_MODELS = {
         "default_current_mA": 300,
         "default_capacity_mAh": 2500,
         "poll_interval": 10,
+        "min_poll_interval": 10,
+        "max_poll_interval": 60,
+        # A8 IR is parsed directly in parse_a8_workstate_mega (hardcoded /100)
+        "ir_divisor": 100.0,
+        "slot_order_reversed": False,
     },
 }
+
 
 # ------------------------------------------------------------------
 # Battery type mappings
@@ -55,8 +76,9 @@ BATTERY_TYPE_STR_TO_INT = {
     "Auto": 6,
 }
 
+
 # ------------------------------------------------------------------
-# Battery limits
+# Battery limits (capacity and cut-off voltage ranges per chemistry)
 # ------------------------------------------------------------------
 BATTERY_LIMITS = {
     "LiHV": {
@@ -81,6 +103,7 @@ BATTERY_LIMITS = {
     },
     "NiMh/NiCd": {
         "capacity_min": 1000, "capacity_max": 4000,
+        # Cut-off is a delta in mV, not an absolute voltage
         "cutoff_min": 3, "cutoff_max": 12,
         "cutoff_enabled": True, "cutoff_default": 4,
     },
@@ -96,6 +119,7 @@ BATTERY_LIMITS = {
     },
 }
 
+
 # ------------------------------------------------------------------
 # Global current limits
 # ------------------------------------------------------------------
@@ -108,17 +132,41 @@ CURRENT_MAX_MA = 2000
 # ------------------------------------------------------------------
 
 def get_model_config(model_key: str) -> Dict[str, Any]:
+    """Return the full configuration dict for a model.
+
+    Falls back to the C4 Air entry if the model is unknown, so callers
+    always get a valid dict.
+    """
     return ISDT_MODELS.get(model_key, ISDT_MODELS["C4 Air"])
 
 
 def get_default_current(model_key: str) -> int:
+    """Default charge current (mA) for a freshly selected battery type."""
     config = get_model_config(model_key)
     return config.get("default_current_mA", 300)
-    
+
+
 def get_poll_interval(model_key: str) -> int:
+    """Default poll interval (seconds) for the model."""
     config = get_model_config(model_key)
     return config.get("poll_interval", 10)
 
+
+def get_min_poll_interval(model_key: str) -> int:
+    """Minimum allowed poll interval (seconds) for the model."""
+    config = get_model_config(model_key)
+    return config.get("min_poll_interval", 2)
+
+
+def get_max_poll_interval(model_key: str) -> int:
+    """Maximum allowed poll interval (seconds) for the model."""
+    config = get_model_config(model_key)
+    return config.get("max_poll_interval", 60)
+
+
 def is_poll_interval_fixed(model_key: str) -> bool:
-    """True, wenn der Poll-Intervall für dieses Modell nicht änderbar ist."""
-    return model_key == "A8 Air"
+    """True if the poll interval cannot be changed by the user.
+
+    No model uses a fixed interval anymore – kept for backwards compatibility.
+    """
+    return False

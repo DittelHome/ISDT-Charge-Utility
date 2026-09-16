@@ -11,7 +11,7 @@ License: MIT
 
 import sys
 
-# Windows WinRT CoInit fix
+# Windows WinRT CoInit fix – must run before any WinRT import
 if sys.platform == "win32":
     sys.coinit_flags = 0
 
@@ -22,8 +22,9 @@ import threading
 import time
 import os
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
+# Set a taskbar AppUserModelID so the icon shows correctly on Windows
 if sys.platform == "win32":
     try:
         import ctypes
@@ -43,7 +44,8 @@ from isdt_config import (
     get_debug_log_folder,
 )
 from isdt_models import (
-    get_default_current, get_poll_interval, is_poll_interval_fixed, 
+    get_default_current, get_poll_interval, is_poll_interval_fixed,
+    get_min_poll_interval, get_max_poll_interval,
     BATTERY_LIMITS,
     CURRENT_MIN_MA, CURRENT_MAX_MA, BATTERY_TYPE_STR_TO_INT,
 )
@@ -68,24 +70,21 @@ class ISDTGui:
         self._selected_device_index = None
 
         self._connect_start_time = 0
-        self._heartbeat_interval_min = 0
+        self._heartbeat_timer_id = None
 
         self._debug_enabled = False
         self._debug_log_file = None
 
-        # Style
+        # ttk style setup
         style = ttk.Style()
         style.theme_use('clam')
         style.configure("Red.TButton", foreground="red", font=('Helvetica', 10, 'bold'))
         style.configure("Gray.TEntry", fieldbackground="lightgray")
-        # Readonly look for locked fields (A8 poll interval)
-        style.configure("Readonly.TEntry", fieldbackground="#e0e0e0", foreground="#606060")
 
-        # Notebook
+        # Notebook with two tabs: Device and Settings
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        self._heartbeat_timer_id = None    
         self.tab_device = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_device, text="Device")
         self._build_device_tab()
@@ -94,6 +93,7 @@ class ISDTGui:
         self.notebook.add(self.tab_settings, text="Settings")
         self._build_settings_tab()
 
+        # Background asyncio loop in a daemon thread
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
@@ -102,7 +102,12 @@ class ISDTGui:
         asyncio.set_event_loop(self.loop)
         self.loop.run_forever()
 
+    # ------------------------------------------------------------------
+    # Application shutdown
+    # ------------------------------------------------------------------
+
     def _on_closing(self):
+        """Gracefully stop polling, disconnect and shut down the asyncio loop."""
         self.polling = False
         self._stop_heartbeat()
 
@@ -135,7 +140,6 @@ class ISDTGui:
                 pass
             time.sleep(0.8)
 
-            # Message 2: only when a device was connected
             ts = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
             self.log.config(state='normal')
             self.log.insert(tk.END, f"[{ts}] ⏳ Disconnected before exit\n")
@@ -174,6 +178,7 @@ class ISDTGui:
     # ------------------------------------------------------------------
 
     def _build_device_tab(self):
+        # Top bar: status, input voltage, total power, buttons
         frame_top = ttk.Frame(self.tab_device)
         frame_top.pack(pady=5, fill=tk.X)
 
@@ -202,11 +207,10 @@ class ISDTGui:
         self.debug_btn = ttk.Button(left_frame, text="DEBUG ON/OFF", width=13, command=self.toggle_debug)
         self.debug_btn.pack(side=tk.LEFT, padx=2)
 
-        # Selected device label (right after the DEBUG button)
         self.device_label = ttk.Label(left_frame, text="Selected: none", foreground="darkblue")
         self.device_label.pack(side=tk.LEFT, padx=15)
 
-        # Table
+        # Main data table
         columns = (
             "Slot", "Status", "Type", "Voltage (V)", "Current (A)",
             "Max Current (mA)", "Capacity (mAh)", "IR (mΩ)", "Charge Time",
@@ -228,7 +232,7 @@ class ISDTGui:
         self.tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
 
-        # Slot settings
+        # Slot settings bar (battery type, current, capacity, cut-off)
         settings_frame = ttk.LabelFrame(self.tab_device, text="🔧 Slot Settings")
         settings_frame.pack(fill=tk.X, padx=10, pady=5)
 
@@ -268,7 +272,7 @@ class ISDTGui:
         set_btn = ttk.Button(settings_frame, text="Apply", style="Red.TButton", command=self.apply_settings)
         set_btn.grid(row=0, column=10, padx=10, pady=5)
 
-        # Log
+        # Log output
         self.log = scrolledtext.ScrolledText(self.tab_device, height=6, state='disabled')
         self.log.pack(fill=tk.X, padx=10, pady=5)
 
@@ -280,6 +284,7 @@ class ISDTGui:
         main_frame = ttk.Frame(self.tab_settings, padding=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
 
+        # Left side: scan + saved devices
         left_frame = ttk.Frame(main_frame)
         left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
 
@@ -320,6 +325,7 @@ class ISDTGui:
                                             command=self.delete_saved_device, state=tk.DISABLED)
         self.delete_device_btn.pack(side=tk.LEFT, padx=2)
 
+        # Right side: per-device settings
         right_frame = ttk.Frame(main_frame)
         right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(10, 0))
 
@@ -367,6 +373,7 @@ class ISDTGui:
         self._refresh_device_lists()
 
     def browse_debug_folder(self):
+        """Open a folder picker for the debug log folder."""
         from tkinter import filedialog
         current = self.settings_debug_folder.get().strip() or os.path.expanduser("~")
         folder = filedialog.askdirectory(title="Select Debug Log Folder", initialdir=current)
@@ -374,7 +381,12 @@ class ISDTGui:
             self.settings_debug_folder.delete(0, tk.END)
             self.settings_debug_folder.insert(0, folder)
 
+    # ------------------------------------------------------------------
+    # Debug logging
+    # ------------------------------------------------------------------
+
     def toggle_debug(self):
+        """Enable or disable the BLE traffic debug log."""
         import datetime
         if self._debug_enabled:
             self._debug_enabled = False
@@ -405,7 +417,12 @@ class ISDTGui:
                 self._debug_enabled = False
                 self._debug_log_file = None
 
+    # ------------------------------------------------------------------
+    # Saved devices list and per-device settings
+    # ------------------------------------------------------------------
+
     def _refresh_device_lists(self):
+        """Reload the saved-device listbox and show the active device."""
         self.saved_devices_listbox.delete(0, tk.END)
         devices = self.config.get("devices", [])
         active_idx = self.config.get("active_device")
@@ -417,7 +434,6 @@ class ISDTGui:
         if active_idx is not None and 0 <= active_idx < len(devices):
             self._show_device_settings(active_idx)
             self.select_device_btn.config(state=tk.DISABLED)
-            # Update top-bar label with the active device name
             active = devices[active_idx]
             name = active.get("name") or active.get("selected_model", "ISDT")
             self.device_label.config(text=f"Selected: {name}")
@@ -426,6 +442,7 @@ class ISDTGui:
             self.device_label.config(text="Selected: none")
 
     def _show_device_settings(self, index):
+        """Fill the per-device settings panel with the given device's values."""
         devices = self.config.get("devices", [])
         if 0 <= index < len(devices):
             device = devices[index]
@@ -441,16 +458,13 @@ class ISDTGui:
 
             self.settings_model.set(model)
 
-            # A8 Air: poll interval is fixed, greyed out
+            # Poll interval is editable for all models; the valid range
+            # (min/max) is enforced when saving.
             self.settings_interval.delete(0, tk.END)
-            if is_poll_interval_fixed(model):
-                self.settings_interval.insert(0, str(get_poll_interval(model)))
-                self.settings_interval.config(state="readonly", style="Readonly.TEntry")
-            else:
-                self.settings_interval.insert(
-                    0, str(device.get("poll_interval", get_poll_interval(model)))
-                )
-                self.settings_interval.config(state="normal", style="TEntry")
+            self.settings_interval.insert(
+                0, str(device.get("poll_interval", get_poll_interval(model)))
+            )
+            self.settings_interval.config(state="normal", style="TEntry")
 
             self.settings_heartbeat.delete(0, tk.END)
             self.settings_heartbeat.insert(0, str(self.config.get("heartbeat_interval", 10)))
@@ -459,6 +473,7 @@ class ISDTGui:
             self._selected_device_index = index
 
     def _clear_device_settings(self):
+        """Reset the per-device settings panel to defaults."""
         self.settings_name.delete(0, tk.END)
         self.settings_mac.config(state="normal")
         self.settings_mac.delete(0, tk.END)
@@ -473,17 +488,32 @@ class ISDTGui:
         self._selected_device_index = None
 
     def _on_model_changed(self, event=None):
-        """Called when the model dropdown is changed. Locks the poll interval
-        for models with a fixed interval (A8 Air), unlocks it for others."""
+        """Called when the model dropdown is changed.
+
+        The poll interval is editable for all models. If the currently entered
+        value is outside the new model's allowed range, it is silently adjusted
+        to the nearest bound so the user does not have to think about it.
+        """
         model = self.settings_model.get().strip()
-        if is_poll_interval_fixed(model):
-            self.settings_interval.delete(0, tk.END)
-            self.settings_interval.insert(0, str(get_poll_interval(model)))
-            self.settings_interval.config(state="readonly", style="Readonly.TEntry")
-        else:
-            self.settings_interval.config(state="normal", style="TEntry")
+        min_i = get_min_poll_interval(model)
+        max_i = get_max_poll_interval(model)
+
+        try:
+            current = int(self.settings_interval.get().strip())
+        except ValueError:
+            current = get_poll_interval(model)
+
+        if current < min_i:
+            current = min_i
+        elif current > max_i:
+            current = max_i
+
+        self.settings_interval.delete(0, tk.END)
+        self.settings_interval.insert(0, str(current))
+        self.settings_interval.config(state="normal", style="TEntry")
 
     def add_selected_device(self):
+        """Add the device selected in the scan list to the saved devices."""
         selection = self.device_listbox.curselection()
         if not selection:
             return
@@ -502,6 +532,7 @@ class ISDTGui:
         self.on_saved_device_select()
 
     def on_saved_device_select(self, event=None):
+        """Enable/disable the buttons based on the selected saved device."""
         selection = self.saved_devices_listbox.curselection()
         if selection:
             idx = selection[0]
@@ -519,6 +550,7 @@ class ISDTGui:
             self.delete_device_btn.config(state=tk.DISABLED)
 
     def select_saved_device(self):
+        """Mark the selected saved device as active."""
         selection = self.saved_devices_listbox.curselection()
         if not selection:
             return
@@ -538,6 +570,7 @@ class ISDTGui:
             self._refresh_device_lists()
 
     def delete_saved_device(self):
+        """Remove the selected saved device from the config."""
         selection = self.saved_devices_listbox.curselection()
         if not selection:
             return
@@ -556,6 +589,7 @@ class ISDTGui:
             self._clear_device_settings()
 
     def save_device_settings(self):
+        """Save the per-device settings, validating the poll interval range."""
         if self._selected_device_index is None:
             messagebox.showerror("Error", "No device selected.")
             return
@@ -567,20 +601,24 @@ class ISDTGui:
             messagebox.showerror("Error", "Device name cannot be empty.")
             return
 
-        if is_poll_interval_fixed(selected_model):
-            interval = get_poll_interval(selected_model)
-            self.settings_interval.delete(0, tk.END)
-            self.settings_interval.insert(0, str(interval))
-            self.settings_interval.config(state="readonly", style="Readonly.TEntry")
-        else:
-            try:
-                interval = int(self.settings_interval.get().strip())
-                if interval < 2:
-                    raise ValueError
-            except ValueError:
-                messagebox.showerror("Error", "Invalid poll interval (≥ 2 seconds).")
-                return
+        # Poll interval – validate against model-specific min/max
+        try:
+            interval = int(self.settings_interval.get().strip())
+        except ValueError:
+            messagebox.showerror("Error", "Invalid poll interval (must be a number).")
+            return
 
+        min_i = get_min_poll_interval(selected_model)
+        max_i = get_max_poll_interval(selected_model)
+        if interval < min_i or interval > max_i:
+            messagebox.showerror(
+                "Error",
+                f"Poll interval for {selected_model} must be between "
+                f"{min_i} and {max_i} seconds."
+            )
+            return
+
+        # Heartbeat interval
         try:
             heartbeat = int(self.settings_heartbeat.get().strip())
             if heartbeat < 1:
@@ -603,6 +641,7 @@ class ISDTGui:
         messagebox.showinfo("Success", "Device settings saved.")
 
     def update_gui_for_model(self):
+        """Update title, slot dropdown and battery types after connect."""
         if not self.device or not self.device.connected:
             return
         model_config = self.device.model_config
@@ -639,6 +678,7 @@ class ISDTGui:
     # ------------------------------------------------------------------
 
     def log_message(self, msg):
+        """Append a timestamped message to the log box."""
         from datetime import datetime
         timestamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         self.log.config(state='normal')
@@ -647,9 +687,11 @@ class ISDTGui:
         self.log.config(state='disabled')
 
     def update_status(self, text, color="black"):
+        """Update the connection status label."""
         self.status_label.config(text=text, foreground=color)
 
     def update_device_info(self, input_voltage_mV, input_current_mA):
+        """Update the input voltage / total power labels."""
         self.input_voltage_label.config(text=f"🔌 Input voltage: {input_voltage_mV/1000:.1f} V")
         if input_voltage_mV > 0 and input_current_mA > 0:
             total_power_W = (input_voltage_mV * input_current_mA) / 1_000_000
@@ -657,7 +699,12 @@ class ISDTGui:
         else:
             self.total_power_label.config(text="⚡ Total power: -- W")
 
+    # ------------------------------------------------------------------
+    # Slot settings field handling
+    # ------------------------------------------------------------------
+
     def _on_battery_type_changed(self, event=None):
+        """Enable/disable the current/capacity/cut-off fields based on type."""
         batt_str = self.battery_type_var.get()
         is_auto = (batt_str == "Auto")
 
@@ -687,6 +734,7 @@ class ISDTGui:
         self._update_cutoff_delta_label()
 
     def _update_cutoff_delta_label(self, event=None):
+        """Show 'Cut-off (ΔmV)' for small NiMh/NiCd values, else 'Cut-off (mV)'."""
         if not hasattr(self, "cutoff_label"):
             return
         try:
@@ -707,6 +755,7 @@ class ISDTGui:
     # ------------------------------------------------------------------
 
     def connect_saved(self):
+        """Connect to the currently active saved device."""
         active = get_active_device(self.config)
         if not active:
             messagebox.showerror("Error", "No device selected.")
@@ -720,6 +769,7 @@ class ISDTGui:
         asyncio.run_coroutine_threadsafe(self._connect_async(), self.loop)
 
     async def _connect_async(self):
+        """Async connection handler – updates the GUI after success."""
         try:
             success = await self.device.connect()
             if success:
@@ -733,9 +783,9 @@ class ISDTGui:
                 self.root.after(0, lambda: self.connect_btn.config(state=tk.DISABLED))
                 self.root.after(0, lambda: self.disconnect_btn.config(state=tk.NORMAL))
                 self.root.after(0, self.update_gui_for_model)
-                
+
                 self._connect_start_time = time.time()
-                self._start_heartbeat() 
+                self._start_heartbeat()
 
                 # A8Task once after connect (no retry)
                 if self.device.is_a8:
@@ -773,6 +823,7 @@ class ISDTGui:
             self.root.after(0, lambda: self.update_status("Disconnected", "gray"))
 
     def disconnect_device(self):
+        """Disconnect the current device and reset the GUI."""
         if self.device:
             self.polling = False
             asyncio.run_coroutine_threadsafe(self.device.disconnect(), self.loop)
@@ -790,10 +841,11 @@ class ISDTGui:
         self.cutoff_entry.config(state='normal', style="TEntry")
 
     # ------------------------------------------------------------------
-    # Polling
+    # Polling and heartbeat
     # ------------------------------------------------------------------
 
     def start_polling(self):
+        """Start the poll loop after a successful connect."""
         if not self.device or not self.device.connected or self.polling:
             return
         self.polling = True
@@ -801,12 +853,16 @@ class ISDTGui:
         self.log_message(f"✅ Polling started (interval: {interval}s)")
         asyncio.run_coroutine_threadsafe(self._poll_loop(interval), self.loop)
 
-
     async def _poll_loop(self, interval):
+        """Repeatedly poll the charger and update the table."""
         if not self.device or not self.device.connected:
             self.polling = False
             return
+
+        # Store a reference so the disconnect callback can cancel this task.
+        self.device.poll_loop_task = asyncio.current_task()
         failures = 0
+
         try:
             while self.polling and self.device and self.device.connected:
                 ok = await self.device.poll_data()
@@ -829,15 +885,28 @@ class ISDTGui:
                         self.log_message(f"⚠️ {MAX_POLL_FAILURES} empty polls – reconnecting in {RECONNECT_DELAY_S}s")
                         self.root.after(RECONNECT_DELAY_S * 1000, self.connect_saved)
                         break
+
                 await asyncio.sleep(interval)
+
         except asyncio.CancelledError:
-            raise
+            # Task was cancelled by the disconnect callback – fall through
+            # to the finally block so the reconnect is scheduled there.
+            pass
+
         finally:
+            self.device.poll_loop_task = None
             self.polling = False
             self._stop_heartbeat()
             self.log_message("✅ Polling stopped")
 
+            # If the link is gone, schedule the reconnect. This covers both
+            # the normal "link lost" path and the callback-driven cancel.
+            if self.device and not self.device.connected:
+                self.log_message(f"⚠️ Link lost – reconnecting in {RECONNECT_DELAY_S}s")
+                self.root.after(RECONNECT_DELAY_S * 1000, self.connect_saved)
+
     def _start_heartbeat(self):
+        """Start (or restart) the heartbeat timer."""
         self._stop_heartbeat()
         interval = self.config.get("heartbeat_interval", 10)
         if interval > 0:
@@ -846,6 +915,7 @@ class ISDTGui:
             )
 
     def _stop_heartbeat(self):
+        """Cancel the heartbeat timer if one is pending."""
         if self._heartbeat_timer_id is not None:
             try:
                 self.root.after_cancel(self._heartbeat_timer_id)
@@ -854,6 +924,7 @@ class ISDTGui:
             self._heartbeat_timer_id = None
 
     def _heartbeat_loop(self):
+        """Log one heartbeat and schedule the next one."""
         self._heartbeat_timer_id = None
         if not self.device or not self.device.connected:
             return
@@ -861,6 +932,7 @@ class ISDTGui:
         self._start_heartbeat()
 
     def _log_heartbeat(self):
+        """Write one heartbeat line with active slot count and uptime."""
         if not self.device or not self.device.connected:
             self.log_message("💓 Heartbeat: disconnected")
             return
@@ -870,13 +942,16 @@ class ISDTGui:
             work = self.device.latest_data.get(f"slot{slot}_workstate", {})
             if work.get("status_str", "idle") not in ("idle", "empty", "done", "error"):
                 active_slots += 1
-        minutes = int(uptime // 60)
+        total_minutes = int(uptime // 60)
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
         self.log_message(
             f"💓 Heartbeat: {active_slots}/{self.device.num_slots} slots active, "
-            f"Connection time {minutes} min"
+            f"Connection time {hours}h {minutes}m"
         )
 
     def _format_time(self, seconds):
+        """Compact time formatter (used for charge time)."""
         if seconds < 0:
             seconds = 0
         if seconds < 60:
@@ -887,6 +962,7 @@ class ISDTGui:
             return f"{seconds//3600:.0f}h {(seconds%3600)//60:.0f}m"
 
     def _battery_bar(self, percent):
+        """Return a textual battery bar for the given percentage."""
         percent = max(0, min(100, percent))
         filled = int(percent / 100 * 12)
         return "█" * filled + "░" * (12 - filled) + f" {percent:3d}%"
@@ -896,6 +972,7 @@ class ISDTGui:
     # ------------------------------------------------------------------
 
     def update_table(self):
+        """Rebuild the data table from the latest poll results."""
         new_values = []
         if not self.device or not self.device.connected:
             if self._last_table_values:
@@ -907,10 +984,12 @@ class ISDTGui:
         input_voltage_mV = 0
         input_current_mA = 0
         now = time.time()
-        elec1 = self.device.latest_data.get("slot1_electric", {})
-        if elec1.get("input_voltage_mV", 0) > 0:
-            input_voltage_mV = elec1["input_voltage_mV"]
-            input_current_mA = elec1.get("input_current_mA", 0)
+
+        # Input voltage comes from its own key (channel 0 electric)
+        elec_in = self.device.latest_data.get("input_electric", {})
+        if elec_in.get("input_voltage_mV", 0) > 0:
+            input_voltage_mV = elec_in["input_voltage_mV"]
+            input_current_mA = elec_in.get("input_current_mA", 0)
 
         for slot in range(1, self.device.num_slots + 1):
             work = self.device.latest_data.get(f"slot{slot}_workstate", {})
@@ -959,8 +1038,8 @@ class ISDTGui:
                 if status == "done":
                     current_A = 0.0
                 else:
-                    # Charge current: prefer the Electric response, fall back to
-                    # the work_current_mA field in the mega-packet (A8 only
+                    # Charge current: prefer the Electric response, fall back
+                    # to the work_current_mA field in the mega packet (A8 only
                     # sends Electric for slot 1, the other slots only have
                     # work_current_mA in the workstate packet).
                     current_mA = elec.get("charging_current_mA", 0)
@@ -1004,6 +1083,7 @@ class ISDTGui:
             self.root.after(0, lambda: self.update_device_info(input_voltage_mV, input_current_mA))
 
     def on_tree_select(self, event):
+        """Copy the selected row's slot and battery type into the settings bar."""
         selection = self.tree.selection()
         if selection:
             values = self.tree.item(selection[0], 'values')
@@ -1016,6 +1096,7 @@ class ISDTGui:
                 self.update_settings_fields()
 
     def update_settings_fields(self):
+        """Sync the slot settings bar with the currently selected slot."""
         if not self.device or not self.device.connected:
             return
         try:
@@ -1042,6 +1123,7 @@ class ISDTGui:
     # ------------------------------------------------------------------
 
     def toggle_alarm_tone(self):
+        """Toggle the charger's alarm tone."""
         if not self.device or not self.device.connected:
             messagebox.showerror("Error", "No device connected.")
             return
@@ -1060,10 +1142,11 @@ class ISDTGui:
             self.log_message("⚠️ Failed to set alarm tone.")
 
     # ------------------------------------------------------------------
-    # Scan
+    # Scan for BLE devices
     # ------------------------------------------------------------------
 
     def scan_devices(self):
+        """Start a BLE scan and populate the found-devices listbox."""
         if self.scanning:
             self.log_message("⚠️ Scan already in progress.")
             return
@@ -1077,6 +1160,7 @@ class ISDTGui:
         self.root.after(15000, self._scan_timeout)
 
     def _scan_timeout(self):
+        """Safety net in case the scan never finishes."""
         if self.scanning:
             self.scanning = False
             self.scan_btn.config(state=tk.NORMAL)
@@ -1084,6 +1168,7 @@ class ISDTGui:
             self.log_message("⚠️ Scan timed out.")
 
     async def _scan_async(self):
+        """Run BleakScanner.discover() in the background thread."""
         from bleak import BleakScanner
         scanner = None
         try:
@@ -1103,6 +1188,7 @@ class ISDTGui:
             self.root.after(0, self._update_scan_results)
 
     def _update_scan_results(self):
+        """Push the scan results into the listbox (GUI thread)."""
         self.scan_btn.config(state=tk.NORMAL)
         self.device_listbox.delete(0, tk.END)
         for d in self.scanned_devices:
@@ -1116,14 +1202,16 @@ class ISDTGui:
         self.scanning = False
 
     def on_device_select(self, event):
+        """Enable the Add button when a scan result is selected."""
         selection = self.device_listbox.curselection()
         self.add_device_btn.config(state=tk.NORMAL if selection else tk.DISABLED)
 
     # ------------------------------------------------------------------
-    # Apply settings
+    # Apply slot settings
     # ------------------------------------------------------------------
 
     def apply_settings(self):
+        """Send the slot settings to the charger (work task)."""
         if not self.device or not self.device.connected:
             messagebox.showerror("Error", "No device connected.")
             return
@@ -1195,6 +1283,7 @@ class ISDTGui:
             messagebox.showerror("Input error", str(e))
 
     def _refresh_a8_task(self):
+        """Re-request per-slot task settings after an Apply on the A8."""
         if self.device and self.device.connected and self.device.is_a8:
             asyncio.run_coroutine_threadsafe(self.device.request_a8_task(), self.loop)
 

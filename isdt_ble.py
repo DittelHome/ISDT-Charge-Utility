@@ -2,6 +2,9 @@
 """
 ISDT BLE – Encapsulates all Bluetooth communication with the charger.
 
+This module owns the BLE client, the notification queue, the connection
+handshake (HW info + bind + stream), both poll paths (A8 mega packet and
+C4/A4 slot-by-slot) and the control commands (worktask, alarm tone).
 """
 
 import sys
@@ -11,6 +14,10 @@ import struct
 import uuid
 
 from bleak import BleakClient
+try:
+    from bleak.args.winrt import WinRTClientArgs
+except ImportError:
+    WinRTClientArgs = None
 
 from isdt_protocol import (
     CHAR_UUID_AF01, CHAR_UUID_AF02,
@@ -24,12 +31,12 @@ from isdt_protocol import (
     parse_alarm_tone, parse_a8_workstate_mega, parse_a8_task_resp,
 )
 
-from isdt_models import get_model_config, get_poll_interval, is_poll_interval_fixed
+from isdt_models import get_model_config, get_poll_interval
 
 
 # ==================================================================
 # TIMING CONSTANTS
-# All delays in seconds unless noted otherwise.
+# All delays are in seconds unless noted otherwise.
 # This is the ONLY place to tune timing. Everything else uses these.
 # ==================================================================
 
@@ -38,18 +45,18 @@ CONNECT_RETRIES = 2               # how many connect attempts
 CONNECT_TIMEOUT_S = 15.0          # hard timeout for BleakClient.connect()
 POST_CONNECT_SETTLE = 1.0         # wait after BLE connect
 POST_NOTIFICATION_SETUP = 0.5     # wait after notify handlers are set up
-HW_INFO_TIMEOUT = 3.0             # hardware-info response timeout
+HW_INFO_TIMEOUT = 2.0             # hardware-info response timeout
+RETRY_PAUSE_S = 10.0              # pause between two connect attempts
 
 # --- Polling ---
-COMMAND_INTERVAL = 0.1            # pause between two GATT writes in one poll
+COMMAND_INTERVAL = 0.2            # pause between two GATT writes in one poll
 RESPONSE_TIMEOUT = 2.0            # wait for any single response
-MAX_POLL_FAILURES = 3             # disconnect after this many empty polls
-RECONNECT_DELAY_S = 15            # fixed delay before reconnect
+MAX_POLL_FAILURES = 2             # disconnect after this many empty polls
+RECONNECT_DELAY_S = 10            # fixed delay before reconnect
 START_POLL_DELAY_MS = 500         # delay between connect and first poll
 
-# --- A8-spezifisch ---
-A8_WORKSTATE_TIMEOUT = 15.0       # A8 needs ~10 s for Mega-Paket
-
+# --- A8-specific ---
+A8_WORKSTATE_TIMEOUT = 15.0       # A8 needs ~10 s for the mega packet
 
 
 # Human-readable command names for the debug traffic log
@@ -88,17 +95,24 @@ class ISDTBLE:
         self.supports_alarm = self.model_config.get("supports_alarm", True)
         self.is_a8 = (self.model_key == "A8 Air")
 
-        if is_poll_interval_fixed(self.model_key):
-            self.poll_interval = get_poll_interval(self.model_key)
-        else:
-            self.poll_interval = device_info.get(
-                "poll_interval", get_poll_interval(self.model_key)
-            )
+        # Per-model IR scaling (C4: 10.0, A4: 100.0)
+        self.ir_divisor = self.model_config.get("ir_divisor", 10.0)
+        # Per-model slot order (A4 reports slots reversed)
+        self.slot_order_reversed = self.model_config.get("slot_order_reversed", False)
+
+        # Poll interval comes straight from the config. The GUI enforces
+        # the model-specific min/max on save, so the value here is always
+        # valid once the user has saved the settings.
+        self.poll_interval = device_info.get(
+            "poll_interval", get_poll_interval(self.model_key)
+        )
 
         self.debug_traffic = False
         self.debug_log_file = None
         self._alarm_tone_state = False
         self.hw_info = {}
+        
+        self.poll_loop_task = None
 
     # ------------------------------------------------------------------
     # Logging
@@ -109,6 +123,7 @@ class ISDTBLE:
             self.log_callback(msg)
 
     def _log_traffic(self, direction: str, data: bytes, description: str = ""):
+        """Write a hex dump line to the debug log file (if enabled)."""
         if not self.debug_traffic:
             return
         log_file = self.debug_log_file
@@ -118,6 +133,8 @@ class ISDTBLE:
         timestamp = datetime.now().strftime("%d/%m/%Y %H:%M:%S.%f")[:-3]
         hex_str = data.hex().upper()
         hex_pairs = ' '.join(hex_str[i:i+2] for i in range(0, len(hex_str), 2))
+
+        # Try to resolve the command name from the first two bytes
         cmd_name = ""
         if len(data) >= 2:
             if data[0] == 0x31:
@@ -129,6 +146,7 @@ class ISDTBLE:
             else:
                 cmd_byte = data[1] if len(data) > 1 else data[0]
             cmd_name = COMMAND_NAMES.get(cmd_byte, "")
+
         name_part = f" ({cmd_name})" if cmd_name else ""
         if description:
             msg = f"[{timestamp}] {description} {direction} {hex_pairs}{name_part}"
@@ -145,6 +163,7 @@ class ISDTBLE:
     # ------------------------------------------------------------------
 
     def notification_handler(self, sender, data):
+        """Queue every incoming BLE notification for the poll loop."""
         data = bytes(data)
         self._log_traffic("📥 NOTIFY", data)
         asyncio.create_task(self.notification_queue.put(data))
@@ -166,10 +185,9 @@ class ISDTBLE:
             except asyncio.TimeoutError:
                 continue
         return None
-        
-        
+
     async def _wait_for_hw_info(self, timeout):
-        """HW-Info-Antwort: 0xE1 an Position 0 (nicht [0x31, 0xE1])."""
+        """HW-Info response starts with 0xE1 at position 0 (not [0x31, 0xE1])."""
         start = asyncio.get_event_loop().time()
         while asyncio.get_event_loop().time() - start < timeout:
             try:
@@ -185,6 +203,11 @@ class ISDTBLE:
     # ------------------------------------------------------------------
 
     async def _initialize(self) -> bool:
+        """Run the connection handshake: HW info, bind, start data stream.
+
+        Returns True only if all three steps succeed. A failed step aborts
+        the whole connect attempt so we never end up half-connected.
+        """
         self._log("✅ Initializing...")
 
         # Hardware info
@@ -253,11 +276,38 @@ class ISDTBLE:
         return True
 
     async def connect(self, retries=CONNECT_RETRIES):
+        """Connect to the charger with the configured number of retries.
+
+        Windows-specific tuning:
+          - disconnected_callback: fires as soon as WinRT reports the link
+            is gone, so the poll loop can react immediately.
+          - use_cached_services=False: forces Windows to re-read the GATT
+            database on every connect. This is critical for the A4/A8,
+            which appear to re-initialize their GATT server when a battery
+            is inserted or removed. Using the cache leads to stale handles
+            and 'Not connected' errors.
+
+        On Linux (and any other non-Windows platform), WinRTClientArgs is
+        None and the winrt kwarg is omitted entirely.
+        """
         attempt = 0
         while attempt < retries:
             client = None
             try:
-                client = BleakClient(self.address, timeout=CONNECT_TIMEOUT_S)
+                if WinRTClientArgs is not None and sys.platform == "win32":
+                    client = BleakClient(
+                        self.address,
+                        timeout=CONNECT_TIMEOUT_S,
+                        disconnected_callback=self._on_disconnected,
+                        winrt=WinRTClientArgs(use_cached_services=False)
+                    )
+                else:
+                    client = BleakClient(
+                        self.address,
+                        timeout=CONNECT_TIMEOUT_S,
+                        disconnected_callback=self._on_disconnected
+                    )
+
                 self.client = client
                 self._log(f"⏳ Connecting... (attempt {attempt+1}/{retries})")
 
@@ -282,7 +332,7 @@ class ISDTBLE:
                     self.connected = False
                     attempt += 1
                     if attempt < retries:
-                        await asyncio.sleep(4.0)
+                        await asyncio.sleep(RETRY_PAUSE_S)
                     continue
 
                 self._log("✅ Initialization complete.")
@@ -305,7 +355,7 @@ class ISDTBLE:
                 self.connected = False
                 attempt += 1
                 if attempt < retries:
-                    await asyncio.sleep(4.0)
+                    await asyncio.sleep(RETRY_PAUSE_S)
 
         self._log("⚠️ All connection attempts failed.")
         if sys.platform == "win32":
@@ -315,6 +365,23 @@ class ISDTBLE:
             self._log("💡 Tip: Please close the ISD Link app on your smartphone.")
             self._log("💡 Tip: Make sure the charger is powered on.")
         return False
+        
+        
+    def _on_disconnected(self, client):
+        """Handle BLE disconnect events fired by Bleak.
+
+        Called from the WinRT event thread. Bleak marshals it into the
+        asyncio loop via call_soon_threadsafe, so it is safe to touch
+        asyncio primitives here. We cancel the running poll loop task so
+        the reconnect is triggered immediately instead of waiting for the
+        next poll interval or a GATT timeout.
+        """
+        self.connected = False
+        self._log("ℹ️ BLE disconnect event received")
+
+        task = self.poll_loop_task
+        if task is not None and not task.done():
+            task.cancel()
 
     # ------------------------------------------------------------------
     # A8 mega-packet poll
@@ -331,7 +398,7 @@ class ISDTBLE:
         if not self.connected or not self.client:
             return False
 
-        # --- Write 1: WorkState (mega-packet for all 8 slots) ---
+        # --- Write 1: WorkState (mega packet for all 8 slots) ---
         cmd = build_command(CMD_WORKSTATE, 1)
         try:
             await self.client.write_gatt_char(CHAR_UUID_AF01, cmd)
@@ -362,7 +429,7 @@ class ISDTBLE:
                 continue
             key = f"slot{slot}_workstate"
             old_data = self.latest_data.get(key, {})
-            # Preserve task settings from previous A8Task
+            # Preserve task settings from the previous A8Task response
             if old_data.get("max_current_mA"):
                 slot_data["max_current_mA"] = old_data["max_current_mA"]
             if old_data.get("max_output_power_mW"):
@@ -376,10 +443,10 @@ class ISDTBLE:
                 "ir_total_mohm": slot_data.get("ir_mohm", 0),
             }
 
-        # Pause between the two writes – this is the critical gap for A8
+        # Pause between the two writes – this is the critical gap for the A8
         await asyncio.sleep(COMMAND_INTERVAL)
 
-        # --- Write 2: Electric (input voltage/current) ---
+        # --- Write 2: Electric (input voltage / current) ---
         elec_cmd = build_command(CMD_ELECTRIC, 1)
         try:
             await self.client.write_gatt_char(CHAR_UUID_AF01, elec_cmd)
@@ -407,53 +474,68 @@ class ISDTBLE:
     # ------------------------------------------------------------------
 
     async def _poll_c4_a4(self):
-        """Simple slot-by-slot polling for C4 / A4."""
+        """Slot-by-slot polling for C4 / A4.
+
+        On the A4, the physical slot order is reversed relative to the
+        protocol channel order: physical slot 1 = channel 3, slot 2 = channel 2,
+        slot 3 = channel 1, slot 4 = channel 0. `slot_order_reversed` in the
+        model config controls this.
+
+        The input-voltage reading (channel 0 electric) is stored under its own
+        key `input_electric` and does NOT overwrite `slot1_electric`.
+        """
         if not self.connected or not self.client:
             return False
 
         received_any = False
 
         for slot in range(1, self.num_slots + 1):
-            cmd = build_command(CMD_WORKSTATE, slot)
+            # Map GUI slot to protocol channel
+            if self.slot_order_reversed:
+                channel = self.num_slots - slot
+            else:
+                channel = slot - 1
+
+            cmd = CMD_WORKSTATE + bytes([channel])
             try:
                 await self.client.write_gatt_char(CHAR_UUID_AF01, cmd)
                 self._log_traffic("📤 WRITE", cmd, "AF01")
             except Exception:
                 continue
 
-            resp = await self._wait_for_opcode(RESP_WORKSTATE, RESPONSE_TIMEOUT, expected_channel=slot - 1)
+            resp = await self._wait_for_opcode(RESP_WORKSTATE, RESPONSE_TIMEOUT, expected_channel=channel)
             if resp:
                 parsed = parse_charger_responses(resp)
                 if parsed:
                     self.latest_data[f"slot{slot}_workstate"] = parsed
                     received_any = True
 
-                    # If slot is active, get IR + Electric
+                    # If the slot is active, get IR + Electric
                     status_str = parsed.get("status_str", "idle")
                     if status_str not in ("idle", "empty", "done", "error"):
                         await asyncio.sleep(COMMAND_INTERVAL)
 
-                        ir_cmd = build_command(CMD_IR, slot)
+                        ir_cmd = CMD_IR + bytes([channel])
                         try:
                             await self.client.write_gatt_char(CHAR_UUID_AF01, ir_cmd)
                             self._log_traffic("📤 WRITE", ir_cmd, "AF01")
                         except Exception:
                             pass
-                        ir_resp = await self._wait_for_opcode(RESP_IR, RESPONSE_TIMEOUT, expected_channel=slot - 1)
+                        ir_resp = await self._wait_for_opcode(RESP_IR, RESPONSE_TIMEOUT, expected_channel=channel)
                         if ir_resp:
-                            parsed_ir = parse_charger_responses(ir_resp)
+                            parsed_ir = parse_charger_responses(ir_resp, ir_divisor=self.ir_divisor)
                             if parsed_ir:
                                 self.latest_data[f"slot{slot}_ir"] = parsed_ir
 
                         await asyncio.sleep(COMMAND_INTERVAL)
 
-                        elec_cmd = build_command(CMD_ELECTRIC, slot)
+                        elec_cmd = CMD_ELECTRIC + bytes([channel])
                         try:
                             await self.client.write_gatt_char(CHAR_UUID_AF01, elec_cmd)
                             self._log_traffic("📤 WRITE", elec_cmd, "AF01")
                         except Exception:
                             pass
-                        elec_resp = await self._wait_for_opcode(RESP_ELECTRIC, RESPONSE_TIMEOUT, expected_channel=slot - 1)
+                        elec_resp = await self._wait_for_opcode(RESP_ELECTRIC, RESPONSE_TIMEOUT, expected_channel=channel)
                         if elec_resp:
                             parsed_elec = parse_charger_responses(elec_resp)
                             if parsed_elec:
@@ -461,8 +543,11 @@ class ISDTBLE:
 
             await asyncio.sleep(COMMAND_INTERVAL)
 
-        # Input voltage (channel 8 electric)
-        elec_cmd = build_command(CMD_ELECTRIC, 1)
+        # Input voltage (channel 0 electric).
+        # IMPORTANT: store under its own key so it does NOT overwrite
+        # slot1_electric. On the A4, slot 1 maps to channel 3, so the
+        # input-voltage reading on channel 0 belongs to a different slot.
+        elec_cmd = CMD_ELECTRIC + bytes([0])
         try:
             await self.client.write_gatt_char(CHAR_UUID_AF01, elec_cmd)
             self._log_traffic("📤 WRITE", elec_cmd, "AF01")
@@ -472,7 +557,7 @@ class ISDTBLE:
         if elec_resp:
             parsed_elec = parse_charger_responses(elec_resp)
             if parsed_elec:
-                self.latest_data["slot1_electric"] = parsed_elec
+                self.latest_data["input_electric"] = parsed_elec
                 received_any = True
 
         return received_any
@@ -482,6 +567,7 @@ class ISDTBLE:
     # ------------------------------------------------------------------
 
     async def poll_data(self):
+        """Run one poll cycle and return True if at least one value was read."""
         if not self.connected or not self.client:
             return False
         try:
@@ -567,6 +653,7 @@ class ISDTBLE:
     # ------------------------------------------------------------------
 
     async def get_alarm_tone(self):
+        """Read the current alarm-tone state from the charger."""
         if not self.supports_alarm or not self.connected or not self.client:
             return None
         try:
@@ -583,6 +670,7 @@ class ISDTBLE:
         return state
 
     async def set_alarm_tone(self, state):
+        """Enable or disable the charger's alarm tone."""
         if not self.supports_alarm or not self.connected or not self.client:
             return False
         task_type = 1 if state else 0
@@ -605,11 +693,22 @@ class ISDTBLE:
     async def set_worktask(self, channel, battery_type, work_current_mA,
                            capacity_limit_mAh, task_type=0, linking_type=0,
                            cells=0, full_charged_volt=0):
+        """Send a work task to a slot (start charging with the given settings).
+
+        `channel` is the 0-based GUI slot index. On models with reversed slot
+        order it is mapped back to the protocol channel here.
+        """
         if not self.connected or not self.client:
             return False
         if work_current_mA > self.max_current_mA:
             self._log(f"⚠️ Current {work_current_mA}mA exceeds max {self.max_current_mA}mA")
             return False
+
+        # The caller passes a 0-based slot index. On the A4 we need to map
+        # it back to the protocol channel if the slot order is reversed.
+        if self.slot_order_reversed:
+            channel = self.num_slots - 1 - channel
+
         cmd = bytearray()
         cmd.append(0x13)
         cmd.append(CMD_WORKTASKS_REQ)
@@ -634,6 +733,7 @@ class ISDTBLE:
     # ------------------------------------------------------------------
 
     async def disconnect(self):
+        """Stop notifications and disconnect the BLE client."""
         async with self._disconnect_lock:
             self.connected = False
             if self.client:

@@ -2,9 +2,14 @@
 """
 ISDT Config – Loads and saves user settings in a JSON file.
 
+The config file holds the list of saved devices, the active device index,
+the heartbeat interval and the debug log folder. Each device entry stores
+its own poll interval, bind UUID and model.
 """
 import json
 import os
+
+from isdt_models import get_poll_interval
 
 CONFIG_FILE = os.path.expanduser("~/.isdt_gui_config.json")
 
@@ -15,9 +20,10 @@ DEFAULT_CONFIG = {
     "heartbeat_interval": 10,
     "debug_log_folder": "",
 }
-from isdt_models import get_poll_interval
+
 
 def load_config():
+    """Load the config from disk, filling in any missing keys."""
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
@@ -37,6 +43,7 @@ def load_config():
 
 
 def get_active_device(config):
+    """Return the currently selected device entry, or None."""
     devices = config.get("devices", [])
     active_idx = config.get("active_device")
     if active_idx is not None and 0 <= active_idx < len(devices):
@@ -45,6 +52,7 @@ def get_active_device(config):
 
 
 def get_device_by_mac(config, mac_address):
+    """Look up a saved device by its MAC address."""
     devices = config.get("devices", [])
     for device in devices:
         if device.get("mac_address") == mac_address:
@@ -53,6 +61,7 @@ def get_device_by_mac(config, mac_address):
 
 
 def save_config(config):
+    """Write the config to disk."""
     if config.get("poll_interval", 0) < 2:
         config["poll_interval"] = 2
     if config.get("heartbeat_interval", 0) < 1:
@@ -62,6 +71,12 @@ def save_config(config):
 
 
 def add_device(config, mac_address, selected_model, name=None, poll_interval=None):
+    """Add or update a device entry. Returns the index of the entry.
+
+    If the device already exists (same MAC), its model and name are updated
+    in place. Otherwise a new entry is created with the model's default
+    poll interval.
+    """
     devices = config.get("devices", [])
     for i, device in enumerate(devices):
         if device.get("mac_address") == mac_address:
@@ -89,6 +104,7 @@ def add_device(config, mac_address, selected_model, name=None, poll_interval=Non
 
 
 def remove_device(config, index):
+    """Remove a device entry and adjust the active-device index."""
     devices = config.get("devices", [])
     if 0 <= index < len(devices):
         removed = devices.pop(index)
@@ -102,6 +118,7 @@ def remove_device(config, index):
 
 
 def set_active_device(config, index):
+    """Mark a device as the active one."""
     devices = config.get("devices", [])
     if 0 <= index < len(devices):
         config["active_device"] = index
@@ -110,6 +127,7 @@ def set_active_device(config, index):
 
 
 def get_debug_log_folder(config):
+    """Return the configured debug log folder, or the user home as fallback."""
     folder = config.get("debug_log_folder", "")
     if not folder:
         folder = os.path.expanduser("~")
