@@ -23,10 +23,8 @@ ISDT_MODELS = {
         "default_capacity_mAh": 2500,
         "poll_interval": 4,
         "min_poll_interval": 2,
-        "max_poll_interval": 60,
-        # IR raw value is transmitted in 0.1 mΩ units -> divide by 10
+        "max_poll_interval": 10,
         "ir_divisor": 10.0,
-        # C4 slot order matches the GUI slot order
         "slot_order_reversed": False,
     },
     "A4 Air": {
@@ -39,10 +37,8 @@ ISDT_MODELS = {
         "default_capacity_mAh": 2500,
         "poll_interval": 10,
         "min_poll_interval": 8,
-        "max_poll_interval": 60,
-        # IR raw value is transmitted in 0.01 mΩ units -> divide by 100
+        "max_poll_interval": 15,
         "ir_divisor": 100.0,
-        # A4 reports slots in reverse order (physical slot 1 = protocol channel 3)
         "slot_order_reversed": True,
     },
     "A8 Air": {
@@ -55,8 +51,7 @@ ISDT_MODELS = {
         "default_capacity_mAh": 2500,
         "poll_interval": 10,
         "min_poll_interval": 10,
-        "max_poll_interval": 60,
-        # A8 IR is parsed directly in parse_a8_workstate_mega (hardcoded /100)
+        "max_poll_interval": 15,
         "ir_divisor": 100.0,
         "slot_order_reversed": False,
     },

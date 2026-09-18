@@ -22,7 +22,7 @@ import threading
 import time
 import os
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 
 # Set a taskbar AppUserModelID so the icon shows correctly on Windows
 if sys.platform == "win32":
@@ -71,17 +71,16 @@ class ISDTGui:
 
         self._connect_start_time = 0
         self._heartbeat_timer_id = None
+        self._closing = False
 
         self._debug_enabled = False
         self._debug_log_file = None
 
-        # ttk style setup
         style = ttk.Style()
         style.theme_use('clam')
         style.configure("Red.TButton", foreground="red", font=('Helvetica', 10, 'bold'))
         style.configure("Gray.TEntry", fieldbackground="lightgray")
 
-        # Notebook with two tabs: Device and Settings
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
@@ -93,7 +92,6 @@ class ISDTGui:
         self.notebook.add(self.tab_settings, text="Settings")
         self._build_settings_tab()
 
-        # Background asyncio loop in a daemon thread
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
@@ -108,6 +106,7 @@ class ISDTGui:
 
     def _on_closing(self):
         """Gracefully stop polling, disconnect and shut down the asyncio loop."""
+        self._closing = True
         self.polling = False
         self._stop_heartbeat()
 
@@ -134,6 +133,7 @@ class ISDTGui:
 
         # Disconnect if connected
         if self.device and self.device.connected:
+            self.device._expected_disconnect = True
             try:
                 asyncio.run_coroutine_threadsafe(self.device.disconnect(), self.loop)
             except Exception:
@@ -756,6 +756,7 @@ class ISDTGui:
 
     def connect_saved(self):
         """Connect to the currently active saved device."""
+        self._closing = False
         active = get_active_device(self.config)
         if not active:
             messagebox.showerror("Error", "No device selected.")
@@ -824,7 +825,9 @@ class ISDTGui:
 
     def disconnect_device(self):
         """Disconnect the current device and reset the GUI."""
+        self._closing = True
         if self.device:
+            self.device._expected_disconnect = True
             self.polling = False
             asyncio.run_coroutine_threadsafe(self.device.disconnect(), self.loop)
             time.sleep(0.1)
@@ -871,8 +874,9 @@ class ISDTGui:
                 if not self.device.connected:
                     self.polling = False
                     self._stop_heartbeat()
-                    self.log_message(f"⚠️ Link lost – reconnecting in {RECONNECT_DELAY_S}s")
-                    self.root.after(RECONNECT_DELAY_S * 1000, self.connect_saved)
+                    if not self._closing:
+                        self.log_message(f"⚠️ Link lost – reconnecting in {RECONNECT_DELAY_S}s")
+                        self.root.after(RECONNECT_DELAY_S * 1000, self.connect_saved)
                     break
 
                 if ok:
@@ -899,11 +903,10 @@ class ISDTGui:
             self._stop_heartbeat()
             self.log_message("✅ Polling stopped")
 
-            # If the link is gone, schedule the reconnect. This covers both
-            # the normal "link lost" path and the callback-driven cancel.
-            if self.device and not self.device.connected:
-                self.log_message(f"⚠️ Link lost – reconnecting in {RECONNECT_DELAY_S}s")
-                self.root.after(RECONNECT_DELAY_S * 1000, self.connect_saved)
+            if not self._closing:
+                if self.device and not self.device.connected:
+                    self.log_message(f"⚠️ Link lost – reconnecting in {RECONNECT_DELAY_S}s")
+                    self.root.after(RECONNECT_DELAY_S * 1000, self.connect_saved)
 
     def _start_heartbeat(self):
         """Start (or restart) the heartbeat timer."""
@@ -940,7 +943,7 @@ class ISDTGui:
         active_slots = 0
         for slot in range(1, self.device.num_slots + 1):
             work = self.device.latest_data.get(f"slot{slot}_workstate", {})
-            if work.get("status_str", "idle") not in ("idle", "empty", "done", "error"):
+            if work.get("status_str", "idle") not in ("idle", "empty", "error"):
                 active_slots += 1
         total_minutes = int(uptime // 60)
         hours = total_minutes // 60

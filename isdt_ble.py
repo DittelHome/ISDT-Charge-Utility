@@ -111,6 +111,7 @@ class ISDTBLE:
         self.debug_log_file = None
         self._alarm_tone_state = False
         self.hw_info = {}
+        self._expected_disconnect = False
         
         self.poll_loop_task = None
 
@@ -213,7 +214,7 @@ class ISDTBLE:
         # Hardware info
         try:
             hw_cmd = struct.pack("<B", CMD_HW_INFO_REQ)
-            await self.client.write_gatt_char(CHAR_UUID_AF02, hw_cmd)
+            await self.client.write_gatt_char(CHAR_UUID_AF02, hw_cmd, response=False)
             self._log_traffic("📤 WRITE", hw_cmd, "AF02")
         except Exception as e:
             self._log(f"⚠️ HW-Info write failed: {e}")
@@ -254,7 +255,7 @@ class ISDTBLE:
         # Send BindReq
         try:
             cmd = struct.pack("<B", CMD_BIND_REQ) + bind_uuid + b"\x00\x00"
-            await self.client.write_gatt_char(CHAR_UUID_AF02, cmd)
+            await self.client.write_gatt_char(CHAR_UUID_AF02, cmd, response=False)
             self._log_traffic("📤 WRITE", cmd, "AF02")
         except Exception as e:
             self._log(f"⚠️ Bind write failed: {e}")
@@ -265,7 +266,7 @@ class ISDTBLE:
         # Start data stream
         try:
             stream_cmd = struct.pack("<B", 0xE2)
-            await self.client.write_gatt_char(CHAR_UUID_AF02, stream_cmd)
+            await self.client.write_gatt_char(CHAR_UUID_AF02, stream_cmd, response=False)
             self._log_traffic("📤 WRITE", stream_cmd, "AF02")
         except Exception as e:
             self._log(f"⚠️ Start data stream failed: {e}")
@@ -370,12 +371,14 @@ class ISDTBLE:
     def _on_disconnected(self, client):
         """Handle BLE disconnect events fired by Bleak.
 
-        Called from the WinRT event thread. Bleak marshals it into the
-        asyncio loop via call_soon_threadsafe, so it is safe to touch
-        asyncio primitives here. We cancel the running poll loop task so
-        the reconnect is triggered immediately instead of waiting for the
-        next poll interval or a GATT timeout.
+        Called from the platform event thread. When the GUI initiated
+        the disconnect (closing the app or manual disconnect), we do
+        nothing here – no reconnect is wanted.
         """
+        if self._expected_disconnect:
+            self._log("ℹ️ Expected disconnect – no action")
+            return
+
         self.connected = False
         self._log("ℹ️ BLE disconnect event received")
 
@@ -401,7 +404,7 @@ class ISDTBLE:
         # --- Write 1: WorkState (mega packet for all 8 slots) ---
         cmd = build_command(CMD_WORKSTATE, 1)
         try:
-            await self.client.write_gatt_char(CHAR_UUID_AF01, cmd)
+            await self.client.write_gatt_char(CHAR_UUID_AF01, cmd, response=False)
             self._log_traffic("📤 WRITE", cmd, "AF01")
         except Exception as e:
             err = str(e).lower()
@@ -449,7 +452,7 @@ class ISDTBLE:
         # --- Write 2: Electric (input voltage / current) ---
         elec_cmd = build_command(CMD_ELECTRIC, 1)
         try:
-            await self.client.write_gatt_char(CHAR_UUID_AF01, elec_cmd)
+            await self.client.write_gatt_char(CHAR_UUID_AF01, elec_cmd, response=False)
             self._log_traffic("📤 WRITE", elec_cmd, "AF01")
         except Exception as e:
             err = str(e).lower()
@@ -498,7 +501,7 @@ class ISDTBLE:
 
             cmd = CMD_WORKSTATE + bytes([channel])
             try:
-                await self.client.write_gatt_char(CHAR_UUID_AF01, cmd)
+                await self.client.write_gatt_char(CHAR_UUID_AF01, cmd, response=False)
                 self._log_traffic("📤 WRITE", cmd, "AF01")
             except Exception:
                 continue
@@ -512,12 +515,12 @@ class ISDTBLE:
 
                     # If the slot is active, get IR + Electric
                     status_str = parsed.get("status_str", "idle")
-                    if status_str not in ("idle", "empty", "done", "error"):
+                    if status_str not in ("idle", "empty", "error"):
                         await asyncio.sleep(COMMAND_INTERVAL)
 
                         ir_cmd = CMD_IR + bytes([channel])
                         try:
-                            await self.client.write_gatt_char(CHAR_UUID_AF01, ir_cmd)
+                            await self.client.write_gatt_char(CHAR_UUID_AF01, ir_cmd, response=False)
                             self._log_traffic("📤 WRITE", ir_cmd, "AF01")
                         except Exception:
                             pass
@@ -531,7 +534,7 @@ class ISDTBLE:
 
                         elec_cmd = CMD_ELECTRIC + bytes([channel])
                         try:
-                            await self.client.write_gatt_char(CHAR_UUID_AF01, elec_cmd)
+                            await self.client.write_gatt_char(CHAR_UUID_AF01, elec_cmd, response=False)
                             self._log_traffic("📤 WRITE", elec_cmd, "AF01")
                         except Exception:
                             pass
@@ -549,7 +552,7 @@ class ISDTBLE:
         # input-voltage reading on channel 0 belongs to a different slot.
         elec_cmd = CMD_ELECTRIC + bytes([0])
         try:
-            await self.client.write_gatt_char(CHAR_UUID_AF01, elec_cmd)
+            await self.client.write_gatt_char(CHAR_UUID_AF01, elec_cmd, response=False)
             self._log_traffic("📤 WRITE", elec_cmd, "AF01")
         except Exception:
             pass
@@ -603,7 +606,7 @@ class ISDTBLE:
             return False
         try:
             cmd = bytes([0x12, 0xEC, 0x00])
-            await self.client.write_gatt_char(CHAR_UUID_AF01, cmd)
+            await self.client.write_gatt_char(CHAR_UUID_AF01, cmd, response=False)
             self._log_traffic("📤 WRITE", cmd, "AF01")
         except Exception as e:
             self._log(f"⚠️ A8Task write failed: {e}")
@@ -657,7 +660,7 @@ class ISDTBLE:
         if not self.supports_alarm or not self.connected or not self.client:
             return None
         try:
-            await self.client.write_gatt_char(CHAR_UUID_AF01, CMD_ALARM_TONE_REQ)
+            await self.client.write_gatt_char(CHAR_UUID_AF01, CMD_ALARM_TONE_REQ, response=False)
             self._log_traffic("📤 WRITE", CMD_ALARM_TONE_REQ, "AF01")
         except Exception:
             return None
@@ -676,7 +679,7 @@ class ISDTBLE:
         task_type = 1 if state else 0
         cmd = bytes(CMD_ALARM_TONE_TASK_REQ) + bytes([task_type])
         try:
-            await self.client.write_gatt_char(CHAR_UUID_AF01, cmd)
+            await self.client.write_gatt_char(CHAR_UUID_AF01, cmd, response=False)
             self._log_traffic("📤 WRITE", cmd, "AF01")
         except Exception:
             return False
@@ -721,7 +724,7 @@ class ISDTBLE:
         cmd.extend(full_charged_volt.to_bytes(2, 'little'))
         cmd.extend(capacity_limit_mAh.to_bytes(4, 'little'))
         try:
-            await self.client.write_gatt_char(CHAR_UUID_AF01, bytes(cmd))
+            await self.client.write_gatt_char(CHAR_UUID_AF01, bytes(cmd), response=False)
             self._log_traffic("📤 WRITE", bytes(cmd), "AF01")
             return True
         except Exception as e:
