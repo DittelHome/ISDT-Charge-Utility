@@ -2,7 +2,7 @@
 
 Technical documentation of the BLE protocol used by ISDT chargers (C4 Air, A8 Air, NP2 Air, LP2 Air, Air8, etc.). Documented from BLE traffic analysis and verified against real device communication.
 
-**Reading commands** are based on analysis by [mtheli/isdt\_air\_ble](https://github.com/mtheli/isdt_air_ble).  
+**Reading commands** are based on analysis by [mtheli/isdt_air_ble](https://github.com/mtheli/isdt_air_ble).  
 **Writing/Control commands** were reverse‑engineered from the ISD Link Android app by [DittelHome/ISDT-Charge-Utility](https://github.com/DittelHome/ISDT-Charge-Utility).
 
 ## Overview
@@ -24,28 +24,28 @@ After connecting, the client performs a **bind handshake** on AF02, optionally q
 ## Connection Flow
 
 ```
-Connect    
-  │    
-  ├── Enable notifications on AF01    
-  ├── Wait ~1.0s (let GATT settle)    
-  │    
-  ├── Bind Handshake (AF02)    
-  │     ├── Enable notifications on AF02    
-  │     ├── Write BindReq (0x18)    
-  │     ├── Wait for BindResp (0x19)    
-  │     └── Disable notifications on AF02    
-  │    
-  ├── Hardware Info Query (AF02, one-time)    
-  │     ├── Enable notifications on AF02    
-  │     ├── Write HardwareInfoReq (0xE0)    
-  │     ├── Wait for HardwareInfoResp (0xE1)    
-  │     └── Disable notifications on AF02    
-  │    
-  └── Polling/Control Loop (AF01)    
-        ├── Write command    
-        ├── Wait 100ms    
-        ├── Write next command    
-        ├── ... (25 commands per cycle for 8-channel devices)    
+Connect  
+  │
+  ├── Enable notifications on AF01
+  ├── Wait ~1.0s (let GATT settle)
+  │
+  ├── Bind Handshake (AF02)
+  │     ├── Enable notifications on AF02
+  │     ├── Write BindReq (0x18)
+  │     ├── Wait for BindResp (0x19)
+  │     └── Disable notifications on AF02
+  │
+  ├── Hardware Info Query (AF02, one-time)
+  │     ├── Enable notifications on AF02
+  │     ├── Write HardwareInfoReq (0xE0)
+  │     ├── Wait for HardwareInfoResp (0xE1)
+  │     └── Disable notifications on AF02
+  │
+  └── Polling/Control Loop (AF01)
+        ├── Write command
+        ├── Wait 100ms
+        ├── Write next command
+        ├── ... (25 commands per cycle for 8-channel devices)
         └── Collect & parse notification responses
 ```
 
@@ -58,11 +58,11 @@ After connecting, the client must register itself with the charger. The UUID is 
 Written to AF02. Total length: 19 bytes.
 
 ```
-Offset  Length  Field    
-──────  ──────  ─────────────    
-0       1       Command: 0x18    
-1       16      Client UUID (random, 16 bytes)    
-17      1       Reserved: 0x00    
+Offset  Length  Field
+──────  ──────  ─────────────
+0       1       Command: 0x18
+1       16      Client UUID (random, 16 bytes)
+17      1       Reserved: 0x00
 18      1       Status: 0x00
 ```
 
@@ -71,9 +71,9 @@ Offset  Length  Field
 Received via AF02 notification.
 
 ```
-Offset  Length  Field    
-──────  ──────  ─────────────    
-0       1       Command: 0x19    
+Offset  Length  Field
+──────  ──────  ─────────────
+0       1       Command: 0x19
 1       1       Bound status (0 = OK)
 ```
 
@@ -86,8 +86,8 @@ One-time query after connect to retrieve firmware version, hardware version, and
 Written to AF02. Single byte.
 
 ```
-Offset  Length  Field    
-──────  ──────  ─────────────    
+Offset  Length  Field
+──────  ──────  ─────────────
 0       1       Command: 0xE0
 ```
 
@@ -96,13 +96,13 @@ Offset  Length  Field
 Received via AF02 notification. Total length: 13 bytes.
 
 ```
-Offset  Length  Field    
-──────  ──────  ─────────────    
-0       1       Command: 0xE1    
-1       1       HW version major    
-2       1       HW version minor    
-3       1       FW version major    
-4       1       FW version minor    
+Offset  Length  Field
+──────  ──────  ─────────────
+0       1       Command: 0xE1
+1       1       HW version major
+2       1       HW version minor
+3       1       FW version major
+4       1       FW version minor
 5       8       Device ID (uint64, little-endian) → serial number
 ```
 
@@ -111,8 +111,8 @@ Offset  Length  Field
 All AF01 notification responses from ISDT chargers share a common frame structure:
 
 ```
-Byte 0: 0x31  Frame header (all charger and adapter models)    
-Byte 1: CMD   Command/response identifier    
+Byte 0: 0x31  Frame header (all charger and adapter models)
+Byte 1: CMD   Command/response identifier
 Byte 2+:      Command-specific payload
 ```
 
@@ -130,7 +130,7 @@ One full cycle consists of 1 + (N × 3) commands, where N is the number of chann
 
 - 8-channel devices (A8 Air, Air8): 25 commands total
 
-| \# | Command | Channel | Description |
+| # | Command | Channel | Description |
 | - | - | - | - |
 | 1 | AlarmToneReq | — | Query alarm tone on/off |
 | 2–4 | WorkState, Electric, IR | 0 | Slot 1 data |
@@ -150,8 +150,8 @@ At 100ms per command, one full cycle takes approximately **2.5 seconds**.
 Queries the current alarm tone / buzzer status.
 
 ```
-Write:    \\\[0x12, 0x92\\\]    
-Response: \\\[0x31, 0x93, state\\\]
+Write:    [0x12, 0x92]
+Response: [0x31, 0x93, state]
 ```
 
 state: 0 = off, non-zero = on.
@@ -163,20 +163,20 @@ state: 0 = off, non-zero = on.
 Sets the alarm tone / buzzer on/off.
 
 ```
-Write:    \\\[0x13, 0x9C, task\\\_type\\\]    
-Response: \\\[0x31, 0x9D, status\\\]
+Write:    [0x13, 0x9C, task_type]
+Response: [0x31, 0x9D, status]
 ```
 
-`task\\\_type`: 0 = off, 1 = on.
+`task_type`: 0 = off, 1 = on.
 
 **AlarmToneTaskResp (0x9D):**
 
 ```
-Offset  Length  Field    
-──────  ──────  ─────────────    
-0       1       Frame header: 0x31    
-1       1       Command: 0x9D    
-2       1       Status              0xFF = success, -1 = error
+Offset  Length  Field
+──────  ──────  ─────────────────────
+0       1       Frame header: 0x31
+1       1       Command: 0x9D
+2       1       Status  0xFF = success, -1 = error
 ```
 
 ### ElectricReq (0x12 0xE4)
@@ -184,40 +184,40 @@ Offset  Length  Field
 Queries voltages, currents, and cell voltages for a channel.
 
 ```
-Write:    \\\[0x12, 0xE4, channel\\\]    
-Response: \\\[0x31, 0xE5, channel, ...\\\]
+Write:    [0x12, 0xE4, channel]
+Response: [0x31, 0xE5, channel, ...]
 ```
 
 **ElectricResp (0xE5)** — two formats depending on response length:
 
-**Long format (\> 35 bytes):** 4-byte voltages, up to 16 cells.
+**Long format (> 35 bytes):** 4-byte voltages, up to 16 cells.
 
 ```
-Offset  Length  Field               Unit    
-──────  ──────  ─────────────       ────    
-0       1       Frame header: 0x31    
-1       1       Command: 0xE5    
-2       1       Channel (0–7)    
-3       4       Input voltage       mV (LE) → ÷1000 = V    
-7       4       Input current       mA (LE) → ÷1000 = A    
-11      4       Output voltage      mV (LE) → ÷1000 = V    
-15      4       Charging current    mA (LE) → ÷1000 = A    
-19      32      Cell voltages ×16   mV (LE, 2 bytes each) → ÷1000 = V
+Offset  Length  Field                  Unit
+──────  ──────  ───────────────────    ────
+0       1       Frame header: 0x31
+1       1       Command: 0xE5
+2       1       Channel (0–7)
+3       4       Input voltage          mV (LE) → ÷1000 = V
+7       4       Input current          mA (LE) → ÷1000 = A
+11      4       Output voltage         mV (LE) → ÷1000 = V
+15      4       Charging current       mA (LE) → ÷1000 = A
+19      32      Cell voltages ×16      mV (LE, 2 bytes each) → ÷1000 = V
 ```
 
 **Short format (≤ 35 bytes):** 2-byte voltages, up to 8 cells.
 
 ```
-Offset  Length  Field               Unit    
-──────  ──────  ─────────────       ────    
-0       1       Frame header: 0x31    
-1       1       Command: 0xE5    
-2       1       Channel (0–7)    
-3       2       Input voltage       mV (LE) → ÷1000 = V    
-5       4       Input current       mA (LE) → ÷1000 = A    
-9       2       Output voltage      mV (LE) → ÷1000 = V    
-11      4       Charging current    mA (LE) → ÷1000 = A    
-15      16      Cell voltages ×8    mV (LE, 2 bytes each) → ÷1000 = V
+Offset  Length  Field                 Unit
+──────  ──────  ───────────────────   ────
+0       1       Frame header: 0x31
+1       1       Command: 0xE5
+2       1       Channel (0–7)
+3       2       Input voltage         mV (LE) → ÷1000 = V
+5       4       Input current         mA (LE) → ÷1000 = A
+9       2       Output voltage        mV (LE) → ÷1000 = V
+11      4       Charging current      mA (LE) → ÷1000 = A
+15      16      Cell voltages ×8      mV (LE), 2 bytes each) → ÷1000 = V
 ```
 
 ### WorkStateReq (0x13 0xE6)
@@ -225,37 +225,37 @@ Offset  Length  Field               Unit
 Queries charge state, capacity, battery type, timing, and error info for a channel.
 
 ```
-Write:    \\\[0x13, 0xE6, channel\\\]    
-Response: \\\[0x31, 0xE7, channel, ...\\\]
+Write:    [0x13, 0xE6, channel]
+Response: [0x31, 0xE7, channel, ...]
 ```
 
 **WorkStateResp (0xE7):**
 
 ```
-Offset  Length  Field                       Unit / Values    
-──────  ──────  ─────────────               ─────────────    
-0       1       Frame header: 0x31    
-1       1       Command: 0xE7    
-2       1       Channel (0–7)    
-3       1       Work state                  See table below    
-4       1       Capacity percentage         0–100 (%)    
-5       4       Capacity done               mAh (LE)    
-9       4       Energy done                 mWh (LE)    
-13      4       Work period                 ms (LE)    
-17      1       Battery type                See table below    
-18      1       Unit serials count (cells)    
-19      1       Link type    
-20      2       Full charged voltage        mV (LE) → ÷1000 = V  ← \\\*\\\*Cut‑off / termination voltage\\\*\\\*    
-22      4       Work current                mA (LE) → ÷1000 = A  ← \\\*\\\*Set/measured current\\\*\\\*    
-26      2       Battery count (whole)       LE    
-28      2       Battery count (current)     LE    
-30      2       Min input voltage           mV (LE) → ÷1000 = V    
-32      4       Max output power            mW (LE) → ÷1000 = W  ← \\\*\\\*Capacity limit\\\*\\\*    
-36      2       Error code                  LE (0 = no error)    
-38      1       Parallel state (optional)   0 or 1
+Offset  Length  Field                      Unit / Values
+──────  ──────  ─────────────────────────  ─────────────
+0       1       Frame header: 0x31
+1       1       Command: 0xE7
+2       1       Channel (0–7)
+3       1       Work state                 See table below
+4       1       Capacity percentage        0–100 (%)
+5       4       Capacity done              mAh (LE)
+9       4       Energy done                mWh (LE)
+13      4       Work period                ms (LE)
+17      1       Battery type               See table below
+18      1       Unit serials count (cells)
+19      1       Link type
+20      2       Full charged voltage       mV (LE) → ÷1000 = V  ← **Cut‑off/termination voltage**
+22      4       Work current               mA (LE) → ÷1000 = A  ← **Set measured current**
+26      2       Battery count (whole)      LE
+28      2       Battery count (current)    LE
+30      2       Min input voltage          mV (LE) → ÷1000 = V
+32      4       Max output power           mW (LE) → ÷1000 = W  ← **Capacity limit**
+36      2       Error code                 LE (0 = no error)
+38      1       Parallel state (optional)  0 or 1
 ```
 
-> **Note:** The fields `full\\\_charged\\\_volt\\\_mV`, `work\\\_current\\\_mA`, and `max\\\_output\\\_power\\\_mW` are used by the ISD Link app and this tool to display and **set** the charging parameters.
+> **Note:** The fields `full_charged_volt_mV`, `work_current_mA`, and `max_output_power_mW` are used by the ISD Link app and this tool to display and **set** the charging parameters.
 
 **Work State values (Standard Models):**
 
@@ -286,30 +286,21 @@ Offset  Length  Field                       Unit / Values
 Queries internal resistance per cell for a channel.
 
 ```
-Write:    \\\[0x13, 0xFA, channel\\\]    
-Response: \\\[0x31, 0xFB, channel, ...\\\]
+Write:    [0x13, 0xFA, channel]
+Response: [0x31, 0xFB, channel, ...]
 ```
 
 **IRResp (0xFB):**
 
 ```
-Offset  Length  Field               Unit    
-──────  ──────  ─────────────       ────    
-0       1       Frame header: 0x31    
-1       1       Command: 0xFB    
-2       1       Channel (0–7)    
+Offset  Length  Field               Unit
+──────  ──────  ─────────────       ────
+0       1       Frame header: 0x31
+1       1       Command: 0xFB
+2       1       Channel (0–7)
 3       N×2     IR per cell         0.1 mΩ (LE, 2 bytes each)
 ```
 
-Number of cells is derived from response length:
-
-- ≥ 20 bytes → 16 cells
-
-- \> 15 bytes → 8 cells
-
-- = 15 bytes → 6 cells
-
-- else → (length − 3) / 2
 
 Values of 0 or ≥ 10000 (1000 mΩ) are treated as invalid / no cell present.
 
@@ -322,26 +313,26 @@ These commands allow **setting** charging parameters on the device. All write c
 Sets battery type, charge current, capacity limit, and cut‑off voltage for a specific channel.
 
 ```
-Write:    \\\[0x13, 0xEA, channel, task\\\_type, battery\\\_type, linking\\\_type,    
-           work\\\_current (4B LE), cells, full\\\_changed\\\_volt (2B LE),    
-           capacity\\\_limit (4B LE)\\\]    
-Response: \\\[0x31, 0xEB, channel, error\\\_code\\\]
+Write:    [0x13, 0xEA, channel, task_type, battery_type, linking_type,
+           work_current (4B LE), cells, full_changed_volt (2B LE),
+           capacity_limit (4B LE)]
+Response: [0x31, 0xEB, channel, error_code]
 ```
 
 **WorkTasksReq format:**
 
 ```
-Offset  Length  Field               Unit / Values    
-──────  ──────  ─────────────       ─────────────    
-0       1       Command: 0x13    
-1       1       Sub-command: 0xEA    
-2       1       Channel (0–7)    
-3       1       Task type            0 = charge, 1 = discharge, 2 = storage, 3 = destroy    
-4       1       Battery type         See Battery Type tables below    
-5       1       Linking type         0 (default)    
-6       4       Work current         mA (LE) → ÷1000 = A    
-10      1       Cells                0 = auto, 1–8 for LiPo/LiFe/LiIon/LiHV/ULiHV, 1–16 for NiMH/NiCd, 1–12 for Pb    
-11      2       Full changed volt    mV (LE) → ÷1000 = V (cut‑off voltage)    
+Offset  Length  Field               Unit / Values
+──────  ──────  ─────────────       ─────────────
+0       1       Command: 0x13
+1       1       Sub-command: 0xEA
+2       1       Channel (0–7)
+3       1       Task type            0 = charge, 1 = discharge, 2 = storage, 3 = destroy
+4       1       Battery type         See Battery Type tables below
+5       1       Linking type         0 (default)
+6       4       Work current         mA (LE) → ÷1000 = A
+10      1       Cells                0 = auto, 1–8 for LiPo/LiFe/LiIon/LiHV/ULiHV, 1–16 for NiMH/NiCd, 1–12 for Pb
+11      2       Full changed volt    mV (LE) → ÷1000 = V (cut‑off voltage)
 13      4       Capacity limit       mAh (LE) → 0 = unlimited
 ```
 
@@ -355,16 +346,16 @@ Offset  Length  Field               Unit / Values
 | 3 | Destroy | Destroy mode |
 
 
-> **Note:** Standard models (C4, A8, NP2) only support `task\\\_type = 0` (Charge).
+> **Note:** Standard models (C4, A8, NP2) only support `task_type = 0` (Charge).
 
 **WorkTasksResp (0xEB):**
 
 ```
-Offset  Length  Field    
-──────  ──────  ─────────────    
-0       1       Frame header: 0x31    
-1       1       Command: 0xEB    
-2       1       Channel (0–7)    
+Offset  Length  Field
+──────  ──────  ─────────────
+0       1       Frame header: 0x31
+1       1       Command: 0xEB
+2       1       Channel (0–7)
 3       1       Error code          0 = OK, 0xFF = error
 ```
 
@@ -400,9 +391,9 @@ Offset  Length  Field
 
 ### Operating Modes
 
-The Air8 supports four operating modes controlled via `task\\\_type` in `WorkTasksReq`:
+The Air8 supports four operating modes controlled via `task_type` in `WorkTasksReq`:
 
-| Mode | task\_type | Description |
+| Mode | task_type | Description |
 | - | - | - |
 | Charge | 0 | Standard charging |
 | Discharge | 1 | Discharge batteries |
@@ -415,11 +406,11 @@ The Air8 supports four operating modes controlled via `task\\\_type` in `WorkTas
 The Air8 has a built-in buzzer that can be controlled via the standard AlarmTone commands:
 
 ```
-Query: \\\[0x12, 0x92\\\] → \\\[0x31, 0x93, state\\\]    
-Set:   \\\[0x13, 0x9C, task\\\_type\\\] → \\\[0x31, 0x9D, status\\\]
+Query: [0x12, 0x92] → [0x31, 0x93, state]
+Set:   [0x13, 0x9C, task_type] → [0x31, 0x9D, status]
 ```
 
-`task\\\_type`: 0 = off, 1 = on
+`task_type`: 0 = off, 1 = on
 
 ### Cell Count Support
 
