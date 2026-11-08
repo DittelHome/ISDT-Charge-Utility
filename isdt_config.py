@@ -6,6 +6,7 @@ The config file holds the list of saved devices, the active device index,
 the heartbeat interval and the debug log folder. Each device entry stores
 its own poll interval, bind UUID and model.
 """
+import copy
 import json
 import os
 
@@ -39,7 +40,7 @@ def load_config():
                 return config
         except Exception:
             pass
-    return DEFAULT_CONFIG.copy()
+    return copy.deepcopy(DEFAULT_CONFIG)
 
 
 def get_active_device(config):

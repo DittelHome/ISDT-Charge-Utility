@@ -38,7 +38,7 @@ ISDT_MODELS = {
         "poll_interval": 10,
         "min_poll_interval": 8,
         "max_poll_interval": 15,
-        "ir_divisor": 100.0,
+        "ir_divisor": 10.0,
         "slot_order_reversed": True,
     },
     "A8 Air": {
@@ -52,7 +52,7 @@ ISDT_MODELS = {
         "poll_interval": 10,
         "min_poll_interval": 10,
         "max_poll_interval": 15,
-        "ir_divisor": 100.0,
+        "ir_divisor": 10.0,
         "slot_order_reversed": False,
     },
 }
@@ -158,10 +158,3 @@ def get_max_poll_interval(model_key: str) -> int:
     config = get_model_config(model_key)
     return config.get("max_poll_interval", 60)
 
-
-def is_poll_interval_fixed(model_key: str) -> bool:
-    """True if the poll interval cannot be changed by the user.
-
-    No model uses a fixed interval anymore – kept for backwards compatibility.
-    """
-    return False

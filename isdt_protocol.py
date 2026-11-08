@@ -22,7 +22,6 @@ CHAR_UUID_AF02 = "0000af02-0000-1000-8000-00805f9b34fb"
 CMD_HW_INFO_REQ = 0xE0
 CMD_HW_INFO_RESP = 0xE1
 CMD_BIND_REQ = 0x18
-CMD_BIND_RESP = 0x19
 
 # ------------------------------------------------------------------
 # AF01 commands (data polling and control)
@@ -305,28 +304,35 @@ def parse_electric(data: bytes) -> dict | None:
     return result
 
 
-def parse_ir(data: bytes, divisor: float = 10.0) -> dict | None:
-    """Parse an IR response.
+def parse_ir(data: bytes, divisor: float = 10.0, single_value: bool = False) -> dict | None:
+    """Parse an IR response according to the documented ISDT IRResp layout.
 
-    The raw value is divided by `divisor` to get mΩ.
-    C4 uses divisor 10.0, A4 uses divisor 100.0.
-    Parsing stops at the first zero or implausible value (>= 10000).
+    Bytes 0..2 are frame header, response opcode and channel. Starting at
+    byte 3, each little-endian uint16 is one cell's resistance in 0.1 mOhm
+    units. Zero and values >= 20000 are treated as invalid/end-of-data markers.
+
+    ``single_value`` preserves the existing A4-specific first-word handling.
+    C4 must use the per-cell array. The displayed C4 pack resistance is the
+    sum of the valid cell resistances (an aggregation inferred for the GUI).
     """
-    if len(data) < 4 or data[1] != RESP_IR:
+    if len(data) < 5 or data[0] != 0x31 or data[1] != RESP_IR:
         return None
+
     channel = data[2]
     ir_values = []
     offset = 3
     while offset + 1 < len(data):
         raw = int.from_bytes(data[offset:offset + 2], "little")
-        if raw == 0 or raw >= 10000:
+        if raw == 0 or raw >= 20000:
             break
         ir_values.append(raw / divisor)
         offset += 2
-    if channel < len(ir_values):
-        ir_total = ir_values[channel]
-    else:
-        ir_total = ir_values[0] if ir_values else 0
+        if single_value:
+            break
+
+    # The protocol channel identifies the slot; it is NOT an index into the
+    # per-cell IR list. For C4's displayed pack resistance, add valid cells.
+    ir_total = sum(ir_values) if ir_values else None
     return {
         "channel": channel,
         "ir_values_mohm": ir_values,
@@ -341,7 +347,7 @@ def parse_alarm_tone(data: bytes) -> bool | None:
     return data[2] != 0
 
 
-def parse_charger_responses(data: bytes, ir_divisor: float = 10.0) -> dict:
+def parse_charger_responses(data: bytes, ir_divisor: float = 10.0, ir_single_value: bool = False) -> dict:
     """Dispatch a response to the correct parser.
 
     `ir_divisor` is only used for IR responses and is passed through to
@@ -355,7 +361,7 @@ def parse_charger_responses(data: bytes, ir_divisor: float = 10.0) -> dict:
     elif cmd == RESP_ELECTRIC:
         return parse_electric(data) or {}
     elif cmd == RESP_IR:
-        return parse_ir(data, divisor=ir_divisor) or {}
+        return parse_ir(data, divisor=ir_divisor, single_value=ir_single_value) or {}
     elif cmd == RESP_A8_TASK:
         return parse_a8_task_resp(data) or {}
     return {}

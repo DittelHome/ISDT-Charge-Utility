@@ -22,7 +22,7 @@ import threading
 import time
 import os
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 
 # Set a taskbar AppUserModelID so the icon shows correctly on Windows
 if sys.platform == "win32":
@@ -44,10 +44,10 @@ from isdt_config import (
     get_debug_log_folder,
 )
 from isdt_models import (
-    get_default_current, get_poll_interval, is_poll_interval_fixed,
+    get_default_current, get_poll_interval,
     get_min_poll_interval, get_max_poll_interval,
     BATTERY_LIMITS,
-    CURRENT_MIN_MA, CURRENT_MAX_MA, BATTERY_TYPE_STR_TO_INT,
+    CURRENT_MIN_MA, CURRENT_MAX_MA, BATTERY_TYPE_STR_TO_INT, ISDT_MODELS,
 )
 
 
@@ -72,6 +72,14 @@ class ISDTGui:
         self._connect_start_time = 0
         self._heartbeat_timer_id = None
         self._closing = False
+        self._reconnect_pending = False
+        self._reconnect_after_id = None
+        self._disconnect_future = None
+        self._disconnect_device_ref = None
+        self._disconnect_started_at = None
+        self._disconnect_progress_after_id = None
+        self._disconnect_completion_callback = None
+        self._disconnect_last_log_second = 0
 
         self._debug_enabled = False
         self._debug_log_file = None
@@ -91,6 +99,7 @@ class ISDTGui:
         self.tab_settings = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_settings, text="Settings")
         self._build_settings_tab()
+        self._set_table_placeholders()
 
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -221,7 +230,7 @@ class ISDTGui:
         col_widths = {
             "Slot": 45, "Status": 130, "Type": 75, "Voltage (V)": 85,
             "Current (A)": 85, "Max Current (mA)": 120, "Capacity (mAh)": 90,
-            "IR (mΩ)": 65, "Charge Time": 90, "Cut-off (mV)": 85,
+            "IR (mΩ)": 80, "Charge Time": 90, "Cut-off (mV)": 85,
             "Cap Limit (mAh)": 95, "Charge Level": 180,
         }
         style = ttk.Style()
@@ -231,6 +240,9 @@ class ISDTGui:
             self.tree.column(col, width=col_widths.get(col, 90), anchor="center", minwidth=40)
         self.tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+        self.tree.bind("<Motion>", self._on_tree_motion)
+        self.tree.bind("<Leave>", self._hide_tree_tooltip)
+        self._ir_tooltip = None
 
         # Slot settings bar (battery type, current, capacity, cut-off)
         settings_frame = ttk.LabelFrame(self.tab_device, text="🔧 Slot Settings")
@@ -533,6 +545,10 @@ class ISDTGui:
 
     def on_saved_device_select(self, event=None):
         """Enable/disable the buttons based on the selected saved device."""
+        if self._disconnect_future is not None:
+            self.select_device_btn.config(state=tk.DISABLED)
+            self.delete_device_btn.config(state=tk.DISABLED)
+            return
         selection = self.saved_devices_listbox.curselection()
         if selection:
             idx = selection[0]
@@ -550,24 +566,46 @@ class ISDTGui:
             self.delete_device_btn.config(state=tk.DISABLED)
 
     def select_saved_device(self):
-        """Mark the selected saved device as active."""
+        """Mark the selected saved device as active after full old-device teardown."""
         selection = self.saved_devices_listbox.curselection()
         if not selection:
             return
         idx = selection[0]
         devices = self.config.get("devices", [])
-        if 0 <= idx < len(devices):
-            if self.device and self.device.connected:
-                if not messagebox.askyesno("Device Switch",
-                                           "A device is currently connected. Disconnect and switch?"):
-                    self._refresh_device_lists()
-                    return
-                self.disconnect_device()
-                time.sleep(0.5)
+        if not (0 <= idx < len(devices)):
+            return
+
+        def finish_switch(success=True):
+            if not success:
+                messagebox.showerror(
+                    "Device Switch",
+                    "The previous BLE connection could not be fully released. "
+                    "Please wait and try again."
+                )
+                return
+            current_devices = self.config.get("devices", [])
+            if not (0 <= idx < len(current_devices)):
+                return
             set_active_device(self.config, idx)
             save_config(self.config)
-            self.log_message(f"📱 Selected device: {devices[idx].get('name', '')}")
+            self.log_message(f"📱 Selected device: {current_devices[idx].get('name', '')}")
             self._refresh_device_lists()
+            self.update_status("Disconnected", "gray")
+            self.update_device_info(0, 0)
+            self._set_table_placeholders()
+
+        if self.device is not None:
+            if self.device.connected:
+                if not messagebox.askyesno(
+                    "Device Switch",
+                    "A device is currently connected. Disconnect and switch?"
+                ):
+                    self._refresh_device_lists()
+                    return
+            self.disconnect_device(on_complete=finish_switch)
+            return
+
+        finish_switch(True)
 
     def delete_saved_device(self):
         """Remove the selected saved device from the config."""
@@ -580,13 +618,26 @@ class ISDTGui:
             device = devices[idx]
             if not messagebox.askyesno("Delete Device", f"Delete '{device.get('name', '')}'?"):
                 return
-            if self.config.get("active_device") == idx:
-                self.disconnect_device()
-            remove_device(self.config, idx)
-            save_config(self.config)
-            self.log_message(f"🗑️ Deleted: {device.get('name', '')}")
-            self._refresh_device_lists()
-            self._clear_device_settings()
+            def finish_delete(success=True):
+                if not success:
+                    messagebox.showerror(
+                        "Delete Device",
+                        "The BLE connection could not be fully released. Device was not deleted."
+                    )
+                    return
+                remove_device(self.config, idx)
+                save_config(self.config)
+                self.log_message(f"🗑️ Deleted: {device.get('name', '')}")
+                self._refresh_device_lists()
+                self._clear_device_settings()
+                self.update_status("Disconnected", "gray")
+                self.update_device_info(0, 0)
+                self._set_table_placeholders()
+
+            if self.config.get("active_device") == idx and self.device is not None:
+                self.disconnect_device(on_complete=finish_delete)
+            else:
+                finish_delete(True)
 
     def save_device_settings(self):
         """Save the per-device settings, validating the poll interval range."""
@@ -671,7 +722,7 @@ class ISDTGui:
             self.log_message("🔇 Alarm tone NOT supported by this model")
             self.alarm_btn.config(state=tk.DISABLED, text="🔇")
 
-        self._last_table_values = []
+        self._set_table_placeholders(self.device)
 
     # ------------------------------------------------------------------
     # Logging
@@ -692,7 +743,13 @@ class ISDTGui:
 
     def update_device_info(self, input_voltage_mV, input_current_mA):
         """Update the input voltage / total power labels."""
-        self.input_voltage_label.config(text=f"🔌 Input voltage: {input_voltage_mV/1000:.1f} V")
+        if input_voltage_mV > 0:
+            self.input_voltage_label.config(
+                text=f"🔌 Input voltage: {input_voltage_mV/1000:.1f} V"
+            )
+        else:
+            self.input_voltage_label.config(text="🔌 Input voltage: -- V")
+
         if input_voltage_mV > 0 and input_current_mA > 0:
             total_power_W = (input_voltage_mV * input_current_mA) / 1_000_000
             self.total_power_label.config(text=f"⚡ Total power: {total_power_W:.1f} W")
@@ -756,90 +813,253 @@ class ISDTGui:
 
     def connect_saved(self):
         """Connect to the currently active saved device."""
+        if self._disconnect_future is not None:
+            self.log_message("ℹ️ BLE disconnect is still in progress; connect is waiting.")
+            return
+
+        if self.device is not None:
+            if self.device.connected:
+                self.log_message("ℹ️ A device is already connected.")
+                return
+            # A disconnected instance may still have a poll task or pending
+            # GATT cleanup. Finish it asynchronously before creating a new client.
+            self.disconnect_device(on_complete=lambda success: self.connect_saved() if success else
+                                   self.log_message("⚠️ Cannot connect until the previous BLE client is released."))
+            return
+
         self._closing = False
+        self._cancel_scheduled_reconnect()
         active = get_active_device(self.config)
         if not active:
             messagebox.showerror("Error", "No device selected.")
             return
-        mac = active.get("mac_address")
-        self.log_message(f"⏳ Connecting to {mac} ...")
-        self.device = ISDTBLE(active, log_callback=self.log_message, config=self.config)
-        if self._debug_enabled:
-            self.device.debug_traffic = True
-            self.device.debug_log_file = self._debug_log_file
-        asyncio.run_coroutine_threadsafe(self._connect_async(), self.loop)
 
-    async def _connect_async(self):
-        """Async connection handler – updates the GUI after success."""
+        mac = active.get("mac_address")
+        self.update_status("Connecting…", "orange")
+        self.update_device_info(0, 0)
+        self._set_table_placeholders()
+        self.log_message(f"⏳ Connecting to {mac} ...")
+        device = ISDTBLE(active, log_callback=self.log_message, config=self.config)
+        if self._debug_enabled:
+            device.debug_traffic = True
+            device.debug_log_file = self._debug_log_file
+        self.device = device
+        asyncio.run_coroutine_threadsafe(self._connect_async(device), self.loop)
+
+    async def _connect_async(self, device):
+        """Connect one captured device instance; ignore stale completions."""
         try:
-            success = await self.device.connect()
+            success = await device.connect()
+            if self.device is not device:
+                await device.disconnect()
+                return
+
             if success:
                 self.config = load_config()
-                self.device.config = self.config
+                device.config = self.config
                 active = get_active_device(self.config)
                 name = (active.get("name") or active.get("selected_model") or "ISDT") if active else "----"
 
-                self.root.after(0, lambda: self.log_message("✅ Connected!"))
-                self.root.after(0, lambda n=name: self.update_status(f"Connected to {n}", "green"))
-                self.root.after(0, lambda: self.connect_btn.config(state=tk.DISABLED))
-                self.root.after(0, lambda: self.disconnect_btn.config(state=tk.NORMAL))
-                self.root.after(0, self.update_gui_for_model)
+                def update_connected_ui():
+                    if self.device is not device:
+                        return
+                    self.log_message("✅ Connected!")
+                    self.update_status(f"Connected to {name}", "green")
+                    self.connect_btn.config(state=tk.DISABLED)
+                    self.disconnect_btn.config(state=tk.NORMAL)
+                    self.update_gui_for_model()
 
+                self.root.after(0, update_connected_ui)
                 self._connect_start_time = time.time()
                 self._start_heartbeat()
 
-                # A8Task once after connect (no retry)
-                if self.device.is_a8:
+                # A8Task once after connect (no retry).
+                if device.is_a8:
                     try:
-                        await self.device.request_a8_task()
+                        await device.request_a8_task()
                     except Exception:
                         pass
 
-                self.root.after(START_POLL_DELAY_MS, self.start_polling)
-                self.root.after(START_POLL_DELAY_MS + 500, self.update_settings_fields)
+                if self.device is not device or not device.connected:
+                    await device.disconnect()
+                    return
+
+                self.root.after(
+                    START_POLL_DELAY_MS,
+                    lambda d=device: self.start_polling(d)
+                )
+                self.root.after(
+                    START_POLL_DELAY_MS + 500,
+                    lambda d=device: self.update_settings_fields()
+                    if self.device is d else None
+                )
             else:
-                self.root.after(0, lambda: self.log_message("⚠️ Connection failed."))
-                try:
-                    if self.device:
-                        await self.device.disconnect()
-                except Exception:
-                    pass
+                self.log_message("⚠️ Connection failed.")
+                await device.disconnect()
+                if self.device is device:
+                    self.device = None
+                    self.root.after(0, lambda: self.connect_btn.config(state=tk.NORMAL))
+                    self.root.after(0, lambda: self.disconnect_btn.config(state=tk.DISABLED))
+                    self.root.after(0, lambda: self.update_status("Disconnected", "gray"))
+                    self.root.after(0, self._set_table_placeholders)
+                    self.root.after(0, lambda: self.update_device_info(0, 0))
+        except Exception as e:
+            err_msg = str(e).strip() or f"{type(e).__name__} (no details)"
+            self.log_message(f"⚠️ Error: {err_msg}")
+            try:
+                await device.disconnect()
+            except Exception:
+                pass
+            if self.device is device:
                 self.device = None
                 self.root.after(0, lambda: self.connect_btn.config(state=tk.NORMAL))
                 self.root.after(0, lambda: self.disconnect_btn.config(state=tk.DISABLED))
                 self.root.after(0, lambda: self.update_status("Disconnected", "gray"))
-        except Exception as e:
-            err_msg = str(e).strip()
-            if not err_msg:
-                err_msg = f"{type(e).__name__} (no details)"
-            self.root.after(0, lambda m=err_msg: self.log_message(f"⚠️ Error: {m}"))
+                self.root.after(0, self._set_table_placeholders)
+                self.root.after(0, lambda: self.update_device_info(0, 0))
+
+    async def _disconnect_device_async(self, device):
+        """Stop polling and release the BLE client in a strictly ordered teardown."""
+        task = device.poll_loop_task
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+
+        # Disconnect first so a pending GATT operation in the poll task can be
+        # interrupted by the backend. ISDTBLE.disconnect() retains its client
+        # and task when WinRT does not finish, so no new device may take over.
+        await device.disconnect()
+
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            done, pending = await asyncio.wait({task}, timeout=5.0)
+            if pending:
+                raise TimeoutError("Polling task did not stop within 5 seconds")
+            await asyncio.gather(task, return_exceptions=True)
+
+    def _cancel_scheduled_reconnect(self):
+        """Cancel a reconnect callback belonging to the previous connection."""
+        self._reconnect_pending = False
+        if self._reconnect_after_id is not None:
             try:
-                if self.device:
-                    await self.device.disconnect()
+                self.root.after_cancel(self._reconnect_after_id)
             except Exception:
                 pass
-            self.device = None
-            self.root.after(0, lambda: self.connect_btn.config(state=tk.NORMAL))
-            self.root.after(0, lambda: self.disconnect_btn.config(state=tk.DISABLED))
-            self.root.after(0, lambda: self.update_status("Disconnected", "gray"))
+            self._reconnect_after_id = None
 
-    def disconnect_device(self):
-        """Disconnect the current device and reset the GUI."""
+    def disconnect_device(self, on_complete=None):
+        """Disconnect asynchronously while keeping the Tkinter UI responsive."""
+        if self._disconnect_future is not None:
+            self.log_message("ℹ️ BLE disconnect is already in progress.")
+            return
+
         self._closing = True
-        if self.device:
-            self.device._expected_disconnect = True
-            self.polling = False
-            asyncio.run_coroutine_threadsafe(self.device.disconnect(), self.loop)
-            time.sleep(0.1)
-            self.device = None
+        self.polling = False
+        self._cancel_scheduled_reconnect()
         self._stop_heartbeat()
+
+        device = self.device
+        if device is None:
+            self._finish_disconnect_ui(device, True)
+            if on_complete:
+                on_complete(True)
+            return
+
+        self._disconnect_device_ref = device
+        self._disconnect_started_at = time.monotonic()
+        self._disconnect_completion_callback = on_complete
+        self._disconnect_last_log_second = 0
+        self.connect_btn.config(state=tk.DISABLED)
+        self.disconnect_btn.config(state=tk.DISABLED, text="Disconnecting…")
+        self.select_device_btn.config(state=tk.DISABLED)
+        self.delete_device_btn.config(state=tk.DISABLED)
+        self.update_status("Disconnecting BLE…", "orange")
+        self.log_message("⏳ Disconnect requested – waiting for BLE client release…")
+
+        try:
+            self._disconnect_future = asyncio.run_coroutine_threadsafe(
+                self._disconnect_device_async(device), self.loop
+            )
+        except Exception as e:
+            self._complete_disconnect(False, e)
+            return
+
+        self._poll_disconnect_progress()
+
+    def _poll_disconnect_progress(self):
+        """Refresh progress from Tk's event loop; never block the GUI thread."""
+        future = self._disconnect_future
+        if future is None:
+            return
+
+        if future.done():
+            error = None
+            try:
+                future.result()
+            except Exception as e:
+                error = e
+            self._complete_disconnect(error is None, error)
+            return
+
+        elapsed = int(time.monotonic() - self._disconnect_started_at)
+        self.update_status(f"Disconnecting BLE… ({elapsed}s)", "orange")
+        milestone = (elapsed // 5) * 5
+        if milestone >= 5 and milestone > self._disconnect_last_log_second:
+            self._disconnect_last_log_second = milestone
+            self.log_message(f"⏳ BLE disconnect still running ({milestone}s); window remains active.")
+
+        self._disconnect_progress_after_id = self.root.after(500, self._poll_disconnect_progress)
+
+    def _complete_disconnect(self, success, error=None):
+        """Finalize an asynchronous disconnect on the Tkinter main thread."""
+        device = self._disconnect_device_ref
+        callback = self._disconnect_completion_callback
+        elapsed = (time.monotonic() - self._disconnect_started_at
+                   if self._disconnect_started_at is not None else 0.0)
+
+        if self._disconnect_progress_after_id is not None:
+            try:
+                self.root.after_cancel(self._disconnect_progress_after_id)
+            except Exception:
+                pass
+            self._disconnect_progress_after_id = None
+
+        self._disconnect_future = None
+        self._disconnect_device_ref = None
+        self._disconnect_started_at = None
+        self._disconnect_completion_callback = None
+        self._disconnect_last_log_second = 0
+
+        if success:
+            if self.device is device:
+                self.device = None
+            self._finish_disconnect_ui(device, True)
+            self.log_message(f"✅ BLE disconnect completed ({elapsed:.1f}s).")
+        else:
+            if error is None:
+                detail = "Unknown error"
+            else:
+                detail = str(error).strip() or type(error).__name__
+            self.connect_btn.config(state=tk.DISABLED if self.device is not None else tk.NORMAL)
+            self.disconnect_btn.config(state=tk.NORMAL, text="Retry Disconnect")
+            self.update_status("Disconnect incomplete – retry required", "red")
+            self.log_message(
+                f"⚠️ BLE disconnect incomplete after {elapsed:.1f}s: {detail}. "
+                "The previous client remains reserved; switching/connecting is blocked."
+            )
+
+        self.on_saved_device_select()
+        if callback:
+            callback(success)
+
+    def _finish_disconnect_ui(self, device, success):
+        """Reset connection widgets after the BLE client was safely released."""
+        if not success:
+            return
         self.connect_btn.config(state=tk.NORMAL)
-        self.disconnect_btn.config(state=tk.DISABLED)
+        self.disconnect_btn.config(state=tk.DISABLED, text="Disconnect")
         self.update_status("Disconnected", "gray")
         self.update_device_info(0, 0)
         self.charge_start_times.clear()
-        self._last_table_values = []
-        self.update_table()
+        self._set_table_placeholders()
         self.alarm_btn.config(text="🔊")
         self.cutoff_entry.config(state='normal', style="TEntry")
 
@@ -847,36 +1067,74 @@ class ISDTGui:
     # Polling and heartbeat
     # ------------------------------------------------------------------
 
-    def start_polling(self):
-        """Start the poll loop after a successful connect."""
-        if not self.device or not self.device.connected or self.polling:
+    def _schedule_reconnect(self, device):
+        """Schedule reconnect only while the same lost device remains selected."""
+        if self._closing or self._reconnect_pending or self.device is not device:
+            return
+        self._reconnect_pending = True
+        self._reconnect_after_id = self.root.after(
+            RECONNECT_DELAY_S * 1000,
+            lambda d=device: self._run_scheduled_reconnect(d)
+        )
+
+    def _run_scheduled_reconnect(self, device):
+        """Reconnect only if the callback still belongs to the active device."""
+        self._reconnect_after_id = None
+        self._reconnect_pending = False
+        if not self._closing and self.device is device:
+            self.connect_saved()
+
+    def _show_disconnected_device_ui(self, device):
+        """Clear stale measurements after the active charger loses its link."""
+        if self.device is not device:
+            return
+        self.update_status("Disconnected – reconnecting…", "orange")
+        self.update_device_info(0, 0)
+        self._set_table_placeholders(device)
+
+    def start_polling(self, device=None):
+        """Start polling the exact device instance that completed connection."""
+        device = device or self.device
+        if (device is None or self.device is not device
+                or not device.connected or self.polling):
             return
         self.polling = True
-        interval = self.device.poll_interval
+        interval = device.poll_interval
         self.log_message(f"✅ Polling started (interval: {interval}s)")
-        asyncio.run_coroutine_threadsafe(self._poll_loop(interval), self.loop)
+        asyncio.run_coroutine_threadsafe(self._poll_loop(interval, device), self.loop)
 
-    async def _poll_loop(self, interval):
-        """Repeatedly poll the charger and update the table."""
-        if not self.device or not self.device.connected:
-            self.polling = False
+    async def _poll_loop(self, interval, device):
+        """Poll only the device instance captured when this task was started."""
+        if self.device is not device or not device.connected:
+            if self.device is device:
+                self.polling = False
             return
 
-        # Store a reference so the disconnect callback can cancel this task.
-        self.device.poll_loop_task = asyncio.current_task()
+        device.poll_loop_task = asyncio.current_task()
         failures = 0
+        client_release_started = False
 
         try:
-            while self.polling and self.device and self.device.connected:
-                ok = await self.device.poll_data()
-                self.root.after(0, self.update_table)
+            while self.polling and self.device is device and device.connected:
+                ok = await device.poll_data()
+                if self.device is not device:
+                    break
+                self.root.after(0, lambda d=device: self.update_table() if self.device is d else None)
 
-                if not self.device.connected:
+                if not device.connected:
                     self.polling = False
                     self._stop_heartbeat()
                     if not self._closing:
-                        self.log_message(f"⚠️ Link lost – reconnecting in {RECONNECT_DELAY_S}s")
-                        self.root.after(RECONNECT_DELAY_S * 1000, self.connect_saved)
+                        self.root.after(
+                            0, lambda d=device: self._show_disconnected_device_ui(d)
+                            if self.device is d else None
+                        )
+                        self.log_message(
+                            f"⚠️ Link lost – releasing BLE client; reconnecting in {RECONNECT_DELAY_S}s"
+                        )
+                        client_release_started = True
+                        await device.disconnect()
+                        self._schedule_reconnect(device)
                     break
 
                 if ok:
@@ -884,29 +1142,48 @@ class ISDTGui:
                 else:
                     failures += 1
                     if failures >= MAX_POLL_FAILURES:
+                        if device.is_a8 and device.connected:
+                            await device.diagnose_a8_ble()
                         self.polling = False
                         self._stop_heartbeat()
-                        self.log_message(f"⚠️ {MAX_POLL_FAILURES} empty polls – reconnecting in {RECONNECT_DELAY_S}s")
-                        self.root.after(RECONNECT_DELAY_S * 1000, self.connect_saved)
+                        self.log_message(
+                            f"⚠️ {MAX_POLL_FAILURES} empty polls – releasing BLE client; "
+                            f"reconnecting in {RECONNECT_DELAY_S}s"
+                        )
+                        client_release_started = True
+                        await device.disconnect()
+                        self.root.after(
+                            0, lambda d=device: self._show_disconnected_device_ui(d)
+                            if self.device is d else None
+                        )
+                        self._schedule_reconnect(device)
                         break
+                    if device.is_a8:
+                        continue
 
                 await asyncio.sleep(interval)
 
         except asyncio.CancelledError:
-            # Task was cancelled by the disconnect callback – fall through
-            # to the finally block so the reconnect is scheduled there.
+            # Manual disconnect cancels this task and awaits its completion.
             pass
 
         finally:
-            self.device.poll_loop_task = None
-            self.polling = False
-            self._stop_heartbeat()
-            self.log_message("✅ Polling stopped")
+            if device.poll_loop_task is asyncio.current_task():
+                device.poll_loop_task = None
+            if self.device is device:
+                self.polling = False
+                if not self._closing:
+                    self._stop_heartbeat()
+                    self.log_message("✅ Polling stopped")
 
-            if not self._closing:
-                if self.device and not self.device.connected:
-                    self.log_message(f"⚠️ Link lost – reconnecting in {RECONNECT_DELAY_S}s")
-                    self.root.after(RECONNECT_DELAY_S * 1000, self.connect_saved)
+                if (not self._closing and not device.connected
+                        and not client_release_started):
+                    client_release_started = True
+                    try:
+                        await device.disconnect()
+                    except Exception as e:
+                        self.log_message(f"⚠️ BLE cleanup after link loss failed: {e}")
+                    self._schedule_reconnect(device)
 
     def _start_heartbeat(self):
         """Start (or restart) the heartbeat timer."""
@@ -941,6 +1218,8 @@ class ISDTGui:
             return
         uptime = time.time() - getattr(self, '_connect_start_time', time.time())
         active_slots = 0
+        is_a8 = getattr(self.device, "model_key", "") == "A8 Air"
+
         for slot in range(1, self.device.num_slots + 1):
             work = self.device.latest_data.get(f"slot{slot}_workstate", {})
             if work.get("status_str", "idle") not in ("idle", "empty", "error"):
@@ -974,14 +1253,45 @@ class ISDTGui:
     # Table update
     # ------------------------------------------------------------------
 
+    def _set_table_placeholders(self, device=None):
+        """Show the selected charger's slot layout without stale measurements."""
+        model_key = None
+        slot_count = 0
+
+        if device is not None:
+            model_key = getattr(device, "model_key", None)
+            slot_count = getattr(device, "num_slots", 0)
+
+        if not model_key:
+            active = get_active_device(self.config)
+            if active:
+                model_key = active.get("selected_model", "C4 Air")
+
+        model_config = ISDT_MODELS.get(model_key or "")
+        if model_config:
+            slot_count = model_config.get("slots", slot_count)
+
+        placeholder = "—"
+        rows = [
+            (slot, placeholder, placeholder, placeholder, placeholder, placeholder,
+             placeholder, placeholder, placeholder, placeholder, placeholder, placeholder)
+            for slot in range(1, slot_count + 1)
+        ]
+
+        if rows == self._last_table_values:
+            return
+
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for row in rows:
+            self.tree.insert("", tk.END, values=row)
+        self._last_table_values = rows
+
     def update_table(self):
         """Rebuild the data table from the latest poll results."""
         new_values = []
         if not self.device or not self.device.connected:
-            if self._last_table_values:
-                for item in self.tree.get_children():
-                    self.tree.delete(item)
-                self._last_table_values = []
+            self._set_table_placeholders(self.device)
             return
 
         input_voltage_mV = 0
@@ -994,14 +1304,18 @@ class ISDTGui:
             input_voltage_mV = elec_in["input_voltage_mV"]
             input_current_mA = elec_in.get("input_current_mA", 0)
 
+        is_a8 = getattr(self.device, "model_key", "") == "A8 Air"
+
         for slot in range(1, self.device.num_slots + 1):
             work = self.device.latest_data.get(f"slot{slot}_workstate", {})
             elec = self.device.latest_data.get(f"slot{slot}_electric", {})
             ir = self.device.latest_data.get(f"slot{slot}_ir", {})
 
             if not work:
-                new_values.append((slot, "idle", "Auto", "0.000", "0.00",
-                                   0, 0, 0, "--:--", "0", "no limit", "—"))
+                placeholder = "—"
+                new_values.append((slot, placeholder, placeholder, placeholder, placeholder,
+                                   placeholder, placeholder, placeholder, placeholder,
+                                   placeholder, placeholder, placeholder))
                 continue
 
             status = work.get("status_str", "idle")
@@ -1029,7 +1343,8 @@ class ISDTGui:
 
             if is_idle:
                 voltage_V = current_A = 0.0
-                capacity = ir_val = capacity_percent = 0
+                capacity = capacity_percent = 0
+                ir_val = "N/A" if is_a8 else 0
                 charge_time_str = "--:--"
                 battery_display = "—"
                 if slot in self.charge_start_times:
@@ -1052,7 +1367,19 @@ class ISDTGui:
 
                 capacity_percent = work.get("capacity_percent", 0)
                 capacity = work.get("capacity_mAh", 0)
-                ir_val = round(ir.get("ir_total_mohm", work.get("ir_mohm", 0)))
+                if is_a8:
+                    # The ISD Link app does not display IR for the A8 Air.
+                    ir_val = "N/A"
+                else:
+                    ir_total = ir.get("ir_total_mohm")
+                    if ir_total is None:
+                        ir_val = "—"
+                    else:
+                        ir_val = round(ir_total)
+                        # Flag high IR readings above 1000 mΩ.
+                        # Keep the measured value visible; the warning is only a hint.
+                        if ir_total > 1000:
+                            ir_val = f"⚠ {ir_val} ⚠"
 
                 work_period_ms = work.get("work_period_ms", 0)
                 if work_period_ms > 0:
@@ -1084,6 +1411,53 @@ class ISDTGui:
 
         if input_voltage_mV > 0:
             self.root.after(0, lambda: self.update_device_info(input_voltage_mV, input_current_mA))
+
+    def _on_tree_motion(self, event):
+        """Show an English tooltip over IR cells."""
+        region = self.tree.identify_region(event.x, event.y)
+        column = self.tree.identify_column(event.x)
+        if region != "cell" or column != "#8":
+            self._hide_tree_tooltip()
+            return
+
+        is_a8 = bool(
+            self.device and getattr(self.device, "model_key", "") == "A8 Air"
+        )
+        if is_a8:
+            tooltip_text = "The A8 Air does not support IR measurement."
+        else:
+            tooltip_text = (
+                "IR measurements are reliable only when the charging "
+                "current is at least 300 mA."
+            )
+
+        # Recreate the tooltip only when its message changes.
+        current_text = getattr(self, "_ir_tooltip_text", None)
+        if self._ir_tooltip is None or current_text != tooltip_text:
+            self._hide_tree_tooltip()
+            self._ir_tooltip = tk.Toplevel(self.root)
+            self._ir_tooltip.wm_overrideredirect(True)
+            label = tk.Label(
+                self._ir_tooltip,
+                text=tooltip_text,
+                background="#ffffe0",
+                relief="solid",
+                borderwidth=1,
+                padx=6,
+                pady=3,
+                font=("Helvetica", 9),
+            )
+            label.pack()
+            self._ir_tooltip_text = tooltip_text
+
+        self._ir_tooltip.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 12}")
+
+    def _hide_tree_tooltip(self, event=None):
+        """Hide the A8 IR tooltip."""
+        if self._ir_tooltip is not None:
+            self._ir_tooltip.destroy()
+            self._ir_tooltip = None
+        self._ir_tooltip_text = None
 
     def on_tree_select(self, event):
         """Copy the selected row's slot and battery type into the settings bar."""

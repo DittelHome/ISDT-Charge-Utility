@@ -8,7 +8,6 @@ C4/A4 slot-by-slot) and the control commands (worktask, alarm tone).
 """
 
 import sys
-import time
 import asyncio
 import struct
 import uuid
@@ -22,7 +21,7 @@ except ImportError:
 from isdt_protocol import (
     CHAR_UUID_AF01, CHAR_UUID_AF02,
     CMD_HW_INFO_REQ, CMD_HW_INFO_RESP,
-    CMD_BIND_REQ, CMD_BIND_RESP,
+    CMD_BIND_REQ,
     CMD_WORKSTATE, CMD_ELECTRIC, CMD_IR, CMD_WORKTASKS_REQ,
     CMD_ALARM_TONE_REQ, CMD_ALARM_TONE_RESP,
     CMD_ALARM_TONE_TASK_REQ, CMD_ALARM_TONE_TASK_RESP,
@@ -56,7 +55,13 @@ RECONNECT_DELAY_S = 10            # fixed delay before reconnect
 START_POLL_DELAY_MS = 500         # delay between connect and first poll
 
 # --- A8-specific ---
-A8_WORKSTATE_TIMEOUT = 15.0       # A8 needs ~10 s for the mega packet
+# Keep these separate from the C4/A4 timings. The A8 uses the same BLE
+# connection, but its startup and response handling get their own margins.
+A8_HW_INFO_TIMEOUT = 5.0          # allow a slower HW-info response during reconnect
+A8_WORKSTATE_TIMEOUT = 15.0       # mega packet; measured responses are normally <1 s
+A8_ELECTRIC_TIMEOUT = 4.0         # A8 input telemetry response
+A8_DIAGNOSTIC_ELECTRIC_TIMEOUT = 3.0  # probe BLE after a missing WorkState mega-packet
+A8_TASK_TIMEOUT = 5.0             # A8 per-slot task settings response
 
 
 # Human-readable command names for the debug traffic log
@@ -86,6 +91,12 @@ class ISDTBLE:
         self.log_callback = log_callback
         self.config = config or {}
         self._disconnect_lock = asyncio.Lock()
+        self._disconnecting = False
+        self._disconnect_task = None
+        self._disconnect_client = None
+        # Keep the client identity after teardown so delayed Bleak callbacks
+        # from an intentional disconnect are not mistaken for link loss.
+        self._expected_disconnect_client = None
 
         self.model_key = device_info.get("selected_model", "C4 Air")
         self.model_config = get_model_config(self.model_key)
@@ -220,7 +231,8 @@ class ISDTBLE:
             self._log(f"⚠️ HW-Info write failed: {e}")
             return False
 
-        hw_resp = await self._wait_for_hw_info(HW_INFO_TIMEOUT)
+        hw_timeout = A8_HW_INFO_TIMEOUT if self.is_a8 else HW_INFO_TIMEOUT
+        hw_resp = await self._wait_for_hw_info(hw_timeout)
 
         if not hw_resp:
             self._log("⚠️ HW-Info timeout – aborting init")
@@ -310,19 +322,49 @@ class ISDTBLE:
                     )
 
                 self.client = client
+                self._expected_disconnect_client = None
                 self._log(f"⏳ Connecting... (attempt {attempt+1}/{retries})")
 
                 await asyncio.wait_for(client.connect(), timeout=CONNECT_TIMEOUT_S)
-                self.connected = True
+                self.connected = bool(client.is_connected)
+                if self.is_a8 and not self.connected:
+                    raise ConnectionError("A8 disconnected immediately after BLE connect")
                 self._log("✅ BLE connected.")
 
                 await asyncio.sleep(POST_CONNECT_SETTLE)
+                # The A8 can report a successful BLE connect and then drop the
+                # link during the settle delay. Do not continue with GATT setup
+                # on a client that has already disconnected.
+                if self.is_a8 and (
+                    self.client is not client or not client.is_connected or not self.connected
+                ):
+                    raise ConnectionError("A8 disconnected before notification setup")
+
                 await client.start_notify(CHAR_UUID_AF01, self.notification_handler)
+                if self.is_a8 and (
+                    self.client is not client or not client.is_connected or not self.connected
+                ):
+                    raise ConnectionError("A8 disconnected while setting up AF01 notifications")
+
                 await client.start_notify(CHAR_UUID_AF02, self.notification_handler)
+                if self.is_a8 and (
+                    self.client is not client or not client.is_connected or not self.connected
+                ):
+                    raise ConnectionError("A8 disconnected while setting up AF02 notifications")
+
                 self._log("✅ Notification handlers registered.")
                 await asyncio.sleep(POST_NOTIFICATION_SETUP)
 
+                if self.is_a8 and (
+                    self.client is not client or not client.is_connected or not self.connected
+                ):
+                    raise ConnectionError("A8 disconnected before initialization")
+
                 ok = await self._initialize()
+                if self.is_a8 and (
+                    self.client is not client or not client.is_connected or not self.connected
+                ):
+                    raise ConnectionError("A8 disconnected during initialization")
                 if not ok:
                     self._log("⚠️ Initialization failed – aborting attempt.")
                     try:
@@ -375,8 +417,16 @@ class ISDTBLE:
         the disconnect (closing the app or manual disconnect), we do
         nothing here – no reconnect is wanted.
         """
-        if self._expected_disconnect:
+        # Intentional disconnect callbacks can arrive after disconnect()
+        # has returned. Match the actual client, not a short-lived global flag.
+        if client is self._expected_disconnect_client or self._disconnecting:
             self._log("ℹ️ Expected disconnect – no action")
+            return
+
+        # Ignore late callbacks from an older client/retry. They must not
+        # invalidate a newer active BLE client.
+        if client is not self.client:
+            self._log("ℹ️ Stale BLE disconnect event ignored")
             return
 
         self.connected = False
@@ -464,13 +514,36 @@ class ISDTBLE:
             self._log(f"⚠️ Electric write failed: {e}")
             return True  # we already have the main data
 
-        elec = await self._wait_for_opcode(RESP_ELECTRIC, RESPONSE_TIMEOUT)
+        elec_timeout = A8_ELECTRIC_TIMEOUT if self.is_a8 else RESPONSE_TIMEOUT
+        elec = await self._wait_for_opcode(RESP_ELECTRIC, elec_timeout)
         if elec:
             parsed_elec = parse_charger_responses(elec)
             if parsed_elec:
+                # Keep the slot-1 electric data and expose the same A8
+                # channel-0 reading as the charger's input telemetry.
                 self.latest_data["slot1_electric"] = parsed_elec
+                self.latest_data["input_electric"] = parsed_elec
 
         return True
+
+    async def diagnose_a8_ble(self):
+        """Silently probe the A8 notification path before releasing a failed link."""
+        if not self.is_a8 or not self.connected or not self.client:
+            return
+
+        diagnostic_cmd = build_command(CMD_ELECTRIC, 1)
+        try:
+            await self.client.write_gatt_char(
+                CHAR_UUID_AF01, diagnostic_cmd, response=False
+            )
+            await self._wait_for_opcode(
+                RESP_ELECTRIC, A8_DIAGNOSTIC_ELECTRIC_TIMEOUT
+            )
+        except Exception as e:
+            err = str(e).lower()
+            if ("-2147023673" in err or "abgebrochen" in err or "abort" in err
+                    or "not connected" in err or "unreachable" in err or "disconnected" in err):
+                self.connected = False
 
     # ------------------------------------------------------------------
     # C4 / A4 poll
@@ -612,7 +685,7 @@ class ISDTBLE:
             self._log(f"⚠️ A8Task write failed: {e}")
             return False
 
-        resp = await self._wait_for_opcode(RESP_A8_TASK, RESPONSE_TIMEOUT)
+        resp = await self._wait_for_opcode(RESP_A8_TASK, A8_TASK_TIMEOUT)
         if not resp:
             self._log("⚠️ A8Task timeout")
             return False
@@ -736,21 +809,68 @@ class ISDTBLE:
     # ------------------------------------------------------------------
 
     async def disconnect(self):
-        """Stop notifications and disconnect the BLE client."""
+        """Release the BLE client without treating a timed-out disconnect as success.
+
+        On Windows, Bleak/WinRT disconnect can remain pending after the charger
+        has emitted its disconnect callback. Keep the client and the original
+        disconnect task until that operation really finishes. This prevents a
+        second charger from being connected while Windows may still own the
+        previous GATT session.
+        """
         async with self._disconnect_lock:
-            self.connected = False
-            if self.client:
-                try:
-                    await self.client.stop_notify(CHAR_UUID_AF01)
-                except Exception:
-                    pass
-                try:
-                    await self.client.stop_notify(CHAR_UUID_AF02)
-                except Exception:
-                    pass
-                try:
-                    await self.client.disconnect()
-                except Exception:
-                    pass
-                self.client = None
-            self._log("⚠️ Disconnected")
+            retry_finished_disconnect = (
+                self._disconnect_task is not None
+                and self._disconnect_task.done()
+                and self._disconnect_client is not None
+                and getattr(self._disconnect_client, "is_connected", False)
+            )
+            if self._disconnect_task is None or retry_finished_disconnect:
+                self.connected = False
+                client = self._disconnect_client if retry_finished_disconnect else self.client
+                if client is None:
+                    return
+
+                self._disconnecting = True
+                self._expected_disconnect_client = client
+                self._disconnect_client = client
+                self._log("ℹ️ Starting BLE client disconnect...")
+                self._disconnect_task = asyncio.create_task(client.disconnect())
+            else:
+                client = self._disconnect_client
+                self._log("ℹ️ Waiting for previous BLE disconnect to finish...")
+
+            disconnect_task = self._disconnect_task
+
+        done, pending = await asyncio.wait({disconnect_task}, timeout=10.0)
+        if pending:
+            self._log(
+                "⚠️ BLE disconnect is still pending after 10s; "
+                "keeping the client reserved and blocking device switch"
+            )
+            raise TimeoutError("BLE client disconnect still pending after 10 seconds")
+
+        disconnect_error = None
+        try:
+            disconnect_task.result()
+        except Exception as e:
+            disconnect_error = e
+
+        # A completed disconnect call is not enough if the backend still says
+        # the link is connected. In that case retain the client for a retry.
+        if client is not None and getattr(client, "is_connected", False):
+            detail = str(disconnect_error).strip() if disconnect_error else "backend still connected"
+            self._log(f"⚠️ BLE disconnect completed but link remains active: {detail}")
+            raise RuntimeError(f"BLE link remains active after disconnect: {detail}")
+
+        async with self._disconnect_lock:
+            if self._disconnect_task is disconnect_task:
+                self._disconnect_task = None
+                self._disconnect_client = None
+                if self.client is client:
+                    self.client = None
+                self._disconnecting = False
+
+        if disconnect_error is not None:
+            self._log(f"ℹ️ BLE disconnect completed with backend notice: {disconnect_error}")
+        self._log("✅ BLE client released; disconnected")
+
