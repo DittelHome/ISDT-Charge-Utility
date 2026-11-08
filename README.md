@@ -102,12 +102,15 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 - **Windows 10 or 11** (with Bluetooth 4.0+)
 
 - **Python 3.13 or higher**
+- **Bleak 3.1.0 or higher**
 
 ### Linux
 
 - **Linux** (with Bluetooth 4.0+)
 
 - **Python 3.13 or higher**
+- **Bleak 3.1.0 or higher**
+
 ---
 ## 🔧 Installation & Usage
 
@@ -210,7 +213,7 @@ python3 isdt.py
 | **Voltage** | Current battery voltage in volts |
 | **Current** | Charge current in amperes |
 | **Capacity** | Charged capacity in mAh |
-| **IR** | Internal resistance in mΩ |
+| **IR** | Internal resistance in mΩ (only A4/C4)|
 | **Charge Time** | Elapsed charging time (from device) |
 | **Charge Level** | Battery bar with percentage |
 
@@ -233,10 +236,10 @@ python3 isdt.py
 | File | Description |
 | - | - |
 | `isdt.py` | Main program (tkinter GUI) |
-| `isdt\\\_ble.py` | BLE communication (connection, polling, control) |
-| `isdt\\\_protocol.py` | Protocol definitions and parsers |
-| `isdt\\\_config.py` | Settings load/save |
-| `isdt\\\_models.py` | Model definitions (C4/A4/A8) |
+| `isdt_ble.py` | BLE communication (connection, polling, control) |
+| `isdt_protocol.py` | Protocol definitions and parsers |
+| `isdt_config.py` | Settings load/save |
+| `isdt_models.py` | Model definitions (C4/A4/A8) |
 | `icon.png` / `icon.ico` | Application icon |
 | `PROTOCOL.md` | Technical BLE protocol documentation |
 
@@ -245,9 +248,9 @@ python3 isdt.py
 
 Settings are stored in:
 
-- **Linux:** `~/.isdt\\\_gui\\\_config.json`
+- **Linux:** `~/.isdt_gui_config.json`
 
-- **Windows:** `C:\\\\Users\\\\username\\\\.isdt\\\_gui\\\_config.json`
+- **Windows:** `C:\Users\username\.isdt_gui_config.json`
 
 ## 🐛 Troubleshooting
 
@@ -279,7 +282,7 @@ The BLE protocol is based on the documentation from the [Home Assistant Integrat
 
 ## Known Issues
 
-- **ISDT A8 Air on Windows:** The A8 Air does not operate stably under Windows. This appears to be related to BLE stack limitations or driver issues with the higher slot count (8 slots) and increased data throughput. Linux uses a different Bluetooth stack (BlueZ) which handles the A8 Air correctly.
+- **None currently known**
 
 ## 💻 Platform Support
 
