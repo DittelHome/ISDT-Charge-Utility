@@ -22,7 +22,7 @@ import threading
 import time
 import os
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 
 # Set a taskbar AppUserModelID so the icon shows correctly on Windows
 if sys.platform == "win32":
@@ -760,8 +760,13 @@ class ISDTGui:
     # Slot settings field handling
     # ------------------------------------------------------------------
 
-    def _on_battery_type_changed(self, event=None):
-        """Enable/disable the current/capacity/cut-off fields based on type."""
+    def _on_battery_type_changed(self, event=None, apply_defaults=True):
+        """Enable/disable setting fields and optionally load chemistry defaults.
+
+        User-initiated chemistry changes load safe model/battery defaults.
+        Programmatic slot selection calls this with apply_defaults=False so
+        the values read from that slot are not overwritten.
+        """
         batt_str = self.battery_type_var.get()
         is_auto = (batt_str == "Auto")
 
@@ -774,19 +779,20 @@ class ISDTGui:
             for w in (self.current_entry, self.capacity_entry, self.cutoff_entry):
                 w.config(state='normal', style="TEntry")
 
-            limits = BATTERY_LIMITS.get(batt_str)
-            if limits:
-                if self.device and self.device.model_key:
-                    default_current = get_default_current(self.device.model_key)
-                    self.current_entry.delete(0, tk.END)
-                    self.current_entry.insert(0, str(default_current))
-                if self.device:
-                    default_capacity = self.device.model_config.get("default_capacity_mAh", 2000)
-                    self.capacity_entry.delete(0, tk.END)
-                    self.capacity_entry.insert(0, str(default_capacity))
-                default_cutoff = limits.get("cutoff_default", 0)
-                self.cutoff_entry.delete(0, tk.END)
-                self.cutoff_entry.insert(0, str(default_cutoff) if default_cutoff > 0 else "0")
+            if apply_defaults:
+                limits = BATTERY_LIMITS.get(batt_str)
+                if limits:
+                    if self.device and self.device.model_key:
+                        default_current = get_default_current(self.device.model_key)
+                        self.current_entry.delete(0, tk.END)
+                        self.current_entry.insert(0, str(default_current))
+                    if self.device:
+                        default_capacity = self.device.model_config.get("default_capacity_mAh", 2000)
+                        self.capacity_entry.delete(0, tk.END)
+                        self.capacity_entry.insert(0, str(default_capacity))
+                    default_cutoff = limits.get("cutoff_default", 0)
+                    self.cutoff_entry.delete(0, tk.END)
+                    self.cutoff_entry.insert(0, str(default_cutoff) if default_cutoff > 0 else "0")
 
         self._update_cutoff_delta_label()
 
@@ -1460,38 +1466,73 @@ class ISDTGui:
         self._ir_tooltip_text = None
 
     def on_tree_select(self, event):
-        """Copy the selected row's slot and battery type into the settings bar."""
+        """Load the selected slot and all of its settings into the settings bar."""
         selection = self.tree.selection()
         if selection:
             values = self.tree.item(selection[0], 'values')
-            if values and len(values) > 2:
+            if values:
                 self.slot_var.set(str(values[0]))
-                if values[2] and values[2] not in ("-", "—"):
-                    if self.device and values[2] in getattr(self.device, "supported_battery_types", []):
-                        self.battery_type_var.set(values[2])
-                        self._on_battery_type_changed()
                 self.update_settings_fields()
 
     def update_settings_fields(self):
-        """Sync the slot settings bar with the currently selected slot."""
+        """Load all settings for the currently selected slot into the settings bar."""
         if not self.device or not self.device.connected:
             return
         try:
-            slot = int(self.slot_var.get()) - 1
-            work = self.device.latest_data.get(f"slot{slot + 1}_workstate", {})
-            batt_type = work.get("battery_type", -1) if work else -1
-            if batt_type >= 0:
+            slot = int(self.slot_var.get())
+            work = self.device.latest_data.get(f"slot{slot}_workstate", {})
+            if not work:
+                return
+
+            # Resolve the chemistry reported for this slot.
+            batt_type = work.get("battery_type", -1)
+            if isinstance(batt_type, int) and batt_type >= 0:
                 inv_map = {v: k for k, v in BATTERY_TYPE_STR_TO_INT.items()}
                 batt_str = inv_map.get(batt_type, "Auto")
             else:
-                batt_str = "Auto"
-            if batt_str in self.device.supported_battery_types:
-                self.battery_type_var.set(batt_str)
-            else:
-                self.battery_type_var.set(
-                    self.device.supported_battery_types[0] if self.device.supported_battery_types else "Auto"
+                batt_str = work.get("battery_type_str", "Auto")
+
+            if batt_str not in self.device.supported_battery_types:
+                batt_str = (
+                    self.device.supported_battery_types[0]
+                    if self.device.supported_battery_types else "Auto"
                 )
-            self._on_battery_type_changed()
+
+            self.battery_type_var.set(batt_str)
+
+            # Change field states without replacing the slot's actual values
+            # with defaults. Defaults are only loaded on a user chemistry change.
+            self._on_battery_type_changed(apply_defaults=False)
+            if batt_str == "Auto":
+                return
+
+            def set_entry(entry, value):
+                entry.delete(0, tk.END)
+                entry.insert(0, str(value))
+
+            # A8 task settings arrive separately from its workstate mega-packet.
+            # Missing fields use the model/chemistry defaults; explicit zeroes
+            # from the charger are preserved (e.g. no capacity limit).
+            current_mA = work.get("max_current_mA")
+            if current_mA is None:
+                current_mA = get_default_current(self.device.model_key)
+            set_entry(self.current_entry, current_mA)
+
+            capacity_mAh = work.get("max_output_power_mW")
+            if capacity_mAh is None:
+                capacity_mAh = self.device.model_config.get("default_capacity_mAh", 2000)
+            set_entry(
+                self.capacity_entry,
+                capacity_mAh if capacity_mAh > 0 else "no limit"
+            )
+
+            limits = BATTERY_LIMITS.get(batt_str, {})
+            cutoff_mV = work.get("full_charged_volt_mV")
+            if cutoff_mV is None:
+                cutoff_mV = limits.get("cutoff_default", 0)
+            set_entry(self.cutoff_entry, cutoff_mV)
+
+            self._update_cutoff_delta_label()
         except Exception as e:
             self.log_message(f"⚠️ update_settings_fields error: {e}")
 
