@@ -1,1 +1,2 @@
-bleak==3.1.0
+bleak>=0.20.0; sys_platform == "linux"
+bleak>=3.1.0; sys_platform == "win32"
