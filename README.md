@@ -120,9 +120,7 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 
 > **No Python installation required!** Just download and run.
 
-\*\*[Download the latest ISDT Charge Utility release\*\*](file:///E:/Werkstatt-Laptop/Software/Messgeräte/releases/latest)
-
-1. Download `ISDT-Charge-Utility.exe`
+1. Download the latest `ISDT-Charge-Utility.exe` from the [GitHub Releases](https://github.com/DittelHome/ISDT-Charge-Utility/releases/latest).
 
 2. Double-click `ISDT-Charge-Utility.exe` to start the application
 
