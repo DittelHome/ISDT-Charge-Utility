@@ -100,16 +100,16 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 ### Windows (Python - for developers)
 
 - **Windows 10 or 11** (with Bluetooth 4.0+)
-
 - **Python 3.13 or higher**
 - **Bleak 3.1.0 or higher**
 
 ### Linux
 
-- **Linux** (with Bluetooth 4.0+)
-
-- **Python 3.13 or higher**
-- **Bleak 3.1.0 or higher**
+- **Linux** with Bluetooth 4.0+
+- **AppImage:** No Python installation required
+- **Source installation:** Python 3.13 or higher
+- **Native installation:** Bleak and Tkinter are installed through the distribution's package manager
+- **Virtual environment:** Bleak 0.20.0 or higher
 
 ---
 ## 🔧 Installation & Usage
@@ -132,49 +132,128 @@ Der Autor übernimmt keinerlei Haftung für Schäden an Geräten, Batterien oder
 
 1. Clone or download the repository
 
-```
-git clone https://github.com/DittelHome/ISDT-Charge-Utility.git    
+```cmd
+git clone https://github.com/DittelHome/ISDT-Charge-Utility.git
 cd ISDT-Charge-Utility
 ```
 
-1. Install dependencies
+2. Create a virtual environment
 
-```
-pip install bleak
+```cmd
+py -3.13 -m venv .venv
 ```
 
-1. Run the application
+3. Activate the virtual environment
 
+```cmd
+.venv\\Scripts\\activate
 ```
+
+4. Install dependencies
+
+```cmd
+python -m pip install --upgrade pip
+python -m pip install "bleak>=3.1.0"
+```
+
+5. Run the application
+
+```cmd
 python isdt.py
 ```
 
-### 🐧 Linux
+### 🐧 Linux – AppImage (recommended for end users)
 
-1. Clone or download the repository
+The AppImage contains the application and its Python dependencies. No separate Python or pip installation is required.
 
+1. Download the latest `ISDT-Charge-Utility-x86_64.AppImage` from the [GitHub Releases](https://github.com/DittelHome/ISDT-Charge-Utility/releases/latest).
+
+2. Make the AppImage executable
+
+```bash
+chmod +x ISDT-Charge-Utility-x86_64.AppImage
 ```
-git clone https://github.com/DittelHome/ISDT-Charge-Utility.git    
+
+3. Run the application
+
+```bash
+./ISDT-Charge-Utility-x86_64.AppImage
+```
+
+**Note:** Bluetooth access still depends on the Linux system's BlueZ/D-Bus configuration.
+
+### 🐧 Linux – Native installation
+
+This variant uses the Python packages provided by your Linux distribution. No virtual environment or pip installation is required.
+
+1. Install system packages
+
+```bash
+sudo apt update
+sudo apt install python3 python3-bleak python3-tk
+```
+
+2. Clone or download the repository
+
+```bash
+git clone https://github.com/DittelHome/ISDT-Charge-Utility.git
 cd ISDT-Charge-Utility
 ```
 
-1. Install dependencies
+3. Run the application
 
-```
-pip install bleak
-```
-
-1. Run the application
-
-```
+```bash
 python3 isdt.py
+```
+
+### 🐧 Linux – Virtual environment (for developers)
+
+Use this variant if you prefer an isolated Python environment or if your distribution does not provide a suitable Bleak package.
+
+1. Install prerequisites
+
+```bash
+sudo apt update
+sudo apt install python3 python3-venv python3-tk
+```
+
+2. Clone or download the repository
+
+```bash
+git clone https://github.com/DittelHome/ISDT-Charge-Utility.git
+cd ISDT-Charge-Utility
+```
+
+3. Create a virtual environment
+
+```bash
+python3 -m venv .venv
+```
+
+4. Activate the virtual environment
+
+```bash
+source .venv/bin/activate
+```
+
+5. Install dependencies
+
+```bash
+python -m pip install --upgrade pip
+python -m pip install "bleak>=0.20.0"
+```
+
+6. Run the application
+
+```bash
+python isdt.py
 ```
 
 ## 🚀 Usage
 
-### Start App (Windows EXE / Python)
+### Start App (Windows EXE / Python / Linux AppImage)
 
-1. **Start the app** – Double-click the `ISDT-Charge-Utility.exe` or run `python isdt.py`
+1. **Start the app** – Double-click `ISDT-Charge-Utility.exe`, run the Linux AppImage, or start the Python version with `python isdt.py`
 
 2. **Scan and save your device** – Settings tab → Scan → Select → Save
 
@@ -298,7 +377,7 @@ The program works natively on both Linux and Windows.
 
 ## 📜 License
 
-MIT License – see [LICENSE](file:///E:/Werkstatt-Laptop/Software/Messgeräte/ISDT_Charger/GIT/LICENSE) file.
+MIT License – see [LICENSE](LICENSE) file.
 
 
 ## 🙏 Acknowledgments
