@@ -22,7 +22,7 @@ import threading
 import time
 import os
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 
 # Set a taskbar AppUserModelID so the icon shows correctly on Windows
 if sys.platform == "win32":
@@ -1708,23 +1708,31 @@ class ISDTGui:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    icon_path = os.path.join(os.path.dirname(__file__), 'icon.ico')
+
+    # Resolve bundled resources for both a normal Python run and PyInstaller.
+    # In a PyInstaller build, --add-data "icon.png:." places icon.png in
+    # the bundle's internal directory (sys._MEIPASS).
+    if getattr(sys, "frozen", False):
+        base_path = getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+
     if sys.platform == "win32":
+        icon_path = os.path.join(base_path, "icon.ico")
         try:
             if os.path.exists(icon_path):
                 root.iconbitmap(default=icon_path)
         except Exception:
             pass
     else:
-        try:
-            png_path = os.path.join(os.path.dirname(__file__), 'icon.png')
-            if os.path.exists(png_path):
-                from PIL import Image, ImageTk
-                image = Image.open(png_path)
-                icon = ImageTk.PhotoImage(image)
-                root.iconphoto(True, icon)
-                root.icon_image = icon
-        except Exception:
-            pass
+        png_path = os.path.join(base_path, "icon.png")
+        if os.path.exists(png_path):
+            # Tkinter loads PNG directly; Pillow's ImageTk extension is not
+            # required and may be unavailable in a PyInstaller bundle.
+            icon = tk.PhotoImage(file=png_path)
+            root.iconphoto(True, icon)
+            # Keep a reference so Tk does not garbage-collect the image.
+            root.icon_image = icon
+
     app = ISDTGui(root)
     root.mainloop()
